@@ -1,0 +1,8 @@
+[package]
+name = "krg-vm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+krg-core = { path = "../krg-core" }
+krg-format = { path = "../krg-format" }

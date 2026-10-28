@@ -6,6 +6,7 @@ members = [
     "crates/krg-gfx",
     "crates/krg-input",
     "crates/krg-sfftool",
+    "crates/krg-vm",
     "crates/krg-android",
 ]
 
