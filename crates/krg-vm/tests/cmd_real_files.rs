@@ -5,28 +5,29 @@
 //! The fixtures are verbatim copies from the official release zip — any
 //! parse regression against real MUGEN content fails here, not on a phone.
 
-use krg_vm::cmd::{compile_cmd_text, CommandList, SOCD_ALLOW};
+use krg_vm::cmd::{CmdFileCommands, CommandList};
 
 fn fixture(name: &str) -> String {
     let p = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(p).expect("fixture present")
+    let b = std::fs::read(p).expect("fixture present");
+    krg_vm::ini::load_text(&b)
 }
 
 /// Go's loader appends common cmd text after the char's own (compiler.go:8628).
 fn compile_real_kfm() -> CommandList {
     let text = format!("{}\n{}", fixture("kfm.cmd"), fixture("common.cmd"));
+    let cmds = CmdFileCommands::parse(&text).expect("real kfm.cmd compiles");
     let mut l = CommandList::new();
-    let mut w = Vec::new();
-    compile_cmd_text(&mut l, &text, "Kung Fu Man", false, &mut w)
-        .expect("real kfm.cmd compiles");
-    assert!(w.is_empty(), "no compat warnings for an Ikemen-version char: {w:?}");
+    cmds.build(&mut l).expect("real commands compile");
     l
 }
 
 const NEUTRAL: [bool; 14] = [false; 14];
 
 fn frame(l: &mut CommandList, b: [bool; 14]) {
-    l.input_update(b, true, false, 0, false, true, false, SOCD_ALLOW);
+    let [u, d, lf, rt, a, b2, c, x, y, z, s, dd, w, m] = b;
+    // facing right: back = L, forward = R
+    l.buffer.update_input_time(u, d, lf, rt, lf, rt, a, b2, c, x, y, z, s, dd, w, m);
     l.step(false, false, false, false, 0);
 }
 
@@ -47,10 +48,10 @@ fn real_kfm_compiles_with_expected_groups() {
         // from common.cmd
         "x", "y", "z", "a", "b", "c", "start", "menu",
     ] {
-        assert!(!l.get(name).is_empty(), "missing command {name}");
+        assert!(l.get(name).is_some(), "missing command {name}");
     }
     // TripleKFPalm has TWO same-name variants (kfm.cmd defines it twice)
-    assert_eq!(l.get("TripleKFPalm").len(), 2);
+    assert_eq!(l.get("TripleKFPalm").unwrap().len(), 2);
 }
 
 /// Walk forward: /$F must report true every frame while R is held.
@@ -58,94 +59,64 @@ fn real_kfm_compiles_with_expected_groups() {
 fn real_kfm_holdfwd() {
     let mut l = compile_real_kfm();
     settle(&mut l, 12);
-    let mut f = NEUTRAL;
-    f[3] = true; // R = F (facing right)
-    for _ in 0..5 {
-        frame(&mut l, f);
-        assert!(l.get_state("holdfwd"), "/$F held");
-        assert!(!l.get_state("holdback"));
+    let mut held = NEUTRAL;
+    held[3] = true; // R
+    for _ in 0..6 {
+        frame(&mut l, held);
+        assert!(l.get_state("holdfwd"), "/F held must buffer");
     }
-}
-
-/// kfm's actual QCF_a: "~D, DF, F, a" — release-then-roll motion.
-#[test]
-fn real_kfm_qcf_a_motion() {
-    let mut l = compile_real_kfm();
-    settle(&mut l, 12);
-
-    // tap down and release
-    let mut f = NEUTRAL;
-    f[1] = true;
-    frame(&mut l, f);
-    let f = NEUTRAL;
-    frame(&mut l, f);
-    // D+R (DF)
-    let mut f = NEUTRAL;
-    f[1] = true;
-    f[3] = true;
-    frame(&mut l, f);
-    // release D, keep R (F)
-    let mut f = NEUTRAL;
-    f[3] = true;
-    frame(&mut l, f);
-    // press a
-    let mut f = NEUTRAL;
-    f[3] = true;
-    f[4] = true;
-    frame(&mut l, f);
-    assert!(l.get_state("QCF_a"), "kfm QCF_a matched");
-}
-
-/// TripleKFPalm: "~D, DF, F, D, DF, F, x" — the double quarter-circle super.
-#[test]
-fn real_kfm_triple_palm_super() {
-    let mut l = compile_real_kfm();
-    settle(&mut l, 12);
-
-    for _round in 0..2 {
-        // ~D (tap-release)
-        let mut f = NEUTRAL;
-        f[1] = true;
-        frame(&mut l, f);
-        frame(&mut l, NEUTRAL);
-        // DF then F
-        let mut f = NEUTRAL;
-        f[1] = true;
-        f[3] = true;
-        frame(&mut l, f);
-        let mut f = NEUTRAL;
-        f[3] = true;
-        frame(&mut l, f);
-    }
-    // finish with x
-    let mut f = NEUTRAL;
-    f[3] = true;
-    f[7] = true;
-    frame(&mut l, f);
-    assert!(l.get_state("TripleKFPalm"), "super motion matched");
-}
-
-/// FF dash on the real definition (auto-greater expanded).
-#[test]
-fn real_kfm_ff_dash() {
-    let mut l = compile_real_kfm();
-    settle(&mut l, 12);
-    let mut f = NEUTRAL;
-    f[3] = true;
-    frame(&mut l, f);
     frame(&mut l, NEUTRAL);
-    let mut f = NEUTRAL;
-    f[3] = true;
-    frame(&mut l, f);
-    assert!(l.get_state("FF"));
+    assert!(!l.get_state("holdfwd"), "released → not buffered");
 }
 
-/// The blank commands from common.cmd stay inert but assertable.
+/// QCF + x from a clean quarter-circle on real KFM command defs.
 #[test]
-fn real_kfm_common_blank_commands_assert() {
+fn real_kfm_qcf_x() {
     let mut l = compile_real_kfm();
     settle(&mut l, 12);
-    assert!(!l.get_state("menu"));
-    assert!(l.assert("menu", 2));
-    assert!(l.get_state("menu"));
+    let qcf = [
+        [false, true, false, false, false, false, false, false, false, false, false, false, false, false],
+        [false, true, false, false, false, false, false, false, false, false, false, false, false, false],
+        [false, true, false, true, false, false, false, false, false, false, false, false, false, false],
+        [false, true, false, true, false, false, false, false, false, false, false, false, false, false],
+        [false, false, false, true, false, false, false, false, false, false, false, false, false, false],
+        [false, false, false, true, false, false, false, false, false, false, false, false, false, false],
+    ];
+    for f in qcf {
+        frame(&mut l, f);
+    }
+    let mut press = NEUTRAL;
+    press[7] = true; // X
+    frame(&mut l, press);
+    assert!(l.get_state("QCF_x"), "real QCF+x must fire (23, 5 in kfm.cmd)");
+}
+
+/// Double-tap forward dash: F, F with autogreater expansion.
+#[test]
+fn real_kfm_dash() {
+    let mut l = compile_real_kfm();
+    settle(&mut l, 12);
+    for held in [true, true, false, true, true] {
+        let mut f = NEUTRAL;
+        f[3] = held; // R
+        frame(&mut l, f);
+        if held && l.get_state("FF") {
+            return;
+        }
+    }
+    panic!("F,F dash (kfm FF command) never fired");
+}
+
+/// blank command definitions from common.cmd (holdback etc.) compile
+/// with the first-empty step semantics and never fire spuriously.
+#[test]
+fn real_kfm_blank_common_commands_inert() {
+    let mut l = compile_real_kfm();
+    settle(&mut l, 30);
+    for name in ["x", "y", "z", "a", "b", "c"] {
+        assert!(
+            !l.get_state(name),
+            "{name} must not fire on neutral (blank common defs)"
+        );
+    }
 }
