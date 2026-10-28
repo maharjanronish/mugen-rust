@@ -1,0 +1,11 @@
+/target
+Cargo.lock
+android/app/src/main/jniLibs/
+android/.gradle/
+android/.gradle-dist/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+!releases/*.apk
+*.aab

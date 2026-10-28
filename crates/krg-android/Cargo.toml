@@ -1,0 +1,17 @@
+[package]
+name = "krg-android"
+description = "Kurogane Android entry point: GameActivity JNI glue (compiled with cargo-ndk into libkurogane.so)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+krg-format = { path = "../krg-format" }
+krg-input = { path = "../krg-input" }
+jni = "0.21"
+android_logger = { version = "0.15", default-features = false }
+log = "0.4"

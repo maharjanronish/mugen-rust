@@ -1,0 +1,9 @@
+[package]
+name = "krg-input"
+description = "Kurogane input: minimal 4-button touch controller with chord synthesis — bit-compatible with Ikemen GO InputBits (input.go:358)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

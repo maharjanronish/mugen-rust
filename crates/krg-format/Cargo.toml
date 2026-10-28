@@ -1,0 +1,12 @@
+[package]
+name = "krg-format"
+description = "Kurogane format layer: SFF v1/v2 sprite files, PCX, RLE5/RLE8/LZ5, AIR animations — faithful port of Ikemen GO src/image.go & src/anim.go"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+krg-core = { path = "../krg-core" }
+memmap2 = { workspace = true }
+png = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "krg-core"
+description = "Kurogane core: lenient MUGEN text parsing, shared types (faithful port of Ikemen GO common.go)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

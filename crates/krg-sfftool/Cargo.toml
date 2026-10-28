@@ -1,0 +1,15 @@
+[package]
+name = "krg-sfftool"
+description = "Kurogane content tool: inspect SFF/AIR files, verify integrity, benchmark decode (host-side CI tool)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "krg-sfftool"
+path = "src/main.rs"
+
+[dependencies]
+krg-core = { path = "../krg-core" }
+krg-format = { path = "../krg-format" }

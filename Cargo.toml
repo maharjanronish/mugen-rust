@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/krg-core",
+    "crates/krg-format",
+    "crates/krg-input",
+    "crates/krg-sfftool",
+    "crates/krg-android",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kurogane — Rust rewrite of the IKEMEN GO engine (MIT, same behavior, less RAM)
+# Profiles tuned for Android 8+ (API 26), aarch64 primary target.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = "fat"              # whole-program optimization — biggest binary-size + speed win
+codegen-units = 1        # better codegen at cost of compile time
+panic = "abort"          # no unwinding on Android; smaller + faster. Fatal errors abort.
+strip = "symbols"
+debug = false
+overflow-checks = false   # MUGEN arithmetic wraps in hot paths (Go semantics)
+
+[profile.release.package."*"]
+opt-level = 3
+
+# Benchmark / profiling profile: same codegen as release but with symbols.
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
+strip = "none"
+
+# Fast host builds while iterating.
+[profile.dev]
+opt-level = 1
+debug = true
+
+[workspace.dependencies]
+memmap2 = "0.9"
+png = "0.17"
+thiserror = "2"
