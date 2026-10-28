@@ -228,6 +228,8 @@ pub struct CharState {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub facing: i32,
+    /// Round-start x (p1start/p2start anchor for roundReset)
+    pub start_pos: f32,
     pub draw_offset: [f32; 2],
     pub pos_frozen: bool,
     // meters
@@ -317,6 +319,7 @@ impl CharState {
             pos: [0.0; 3],
             vel: [0.0; 3],
             facing: 1,
+            start_pos: 0.0,
             draw_offset: [0.0; 2],
             pos_frozen: false,
             life,
@@ -1400,6 +1403,22 @@ pub struct Fight {
     pub env_shake: (i32, i32, f32, f32), // time, ampl, freq, phase
     pub finished: bool,
     pub wins: [i32; 2],
+    /// ticks spent in round_state 3 (over grace)
+    pub over_timer: i32,
+    /// wins needed to take the match (default 2, config rounds.to.win)
+    pub max_wins: i32,
+    // ── fight camera (camera.go port, classic model) ─────────────────
+    /// Camera x in stage space (chars draw at pos - cam)
+    pub cam_x: f32,
+    /// Camera y: negative while tracking jumps (boundhigh..0)
+    pub cam_y: f32,
+    /// [Camera] stage scroll bounds: left, right, high (camera.go:8-10)
+    pub cam_bound_left: f32,
+    pub cam_bound_right: f32,
+    pub cam_bound_high: f32,
+    /// verticalfollow (kfm.def default 0.2) + floortension
+    pub cam_vfollow: f32,
+    pub cam_floortension: f32,
 }
 
 impl Fight {
@@ -1419,6 +1438,68 @@ impl Fight {
             env_shake: (0, 0, 60.0, 0.0),
             finished: false,
             wins: [0; 2],
+            over_timer: 0,
+            max_wins: 2,
+            cam_x: 0.0,
+            cam_y: 0.0,
+            cam_bound_left: -150.0,
+            cam_bound_right: 150.0,
+            cam_bound_high: -25.0,
+            cam_vfollow: 0.2,
+            cam_floortension: 0.0,
+        }
+    }
+
+    /// Stage camera parameters (StageDef [Camera] values, scaled to
+    /// 320-space by the caller).
+    pub fn set_stage_camera(
+        &mut self,
+        left: f32,
+        right: f32,
+        high: f32,
+        vfollow: f32,
+        floortension: f32,
+    ) {
+        self.cam_bound_left = left;
+        self.cam_bound_right = right;
+        self.cam_bound_high = high;
+        self.cam_vfollow = vfollow;
+        self.cam_floortension = floortension;
+    }
+
+    /// Classic camera follow (old camera.go action): x tracks the alive
+    /// players' midpoint clamped to the stage scroll bounds; y tracks the
+    /// highest char past floortension scaled by verticalfollow, faster up
+    /// than down.
+    fn camera_update(&mut self) {
+        let (mut sum, mut n) = (0.0f32, 0usize);
+        let mut highest = 0.0f32;
+        for c in &self.chars {
+            if !c.alive {
+                continue;
+            }
+            sum += c.pos[0];
+            n += 1;
+            highest = highest.min(c.pos[1]);
+        }
+        if n > 0 {
+            let mid = sum / n as f32;
+            let target_x = mid.clamp(self.cam_bound_left, self.cam_bound_right);
+            self.cam_x += (target_x - self.cam_x) * 0.45;
+            if (self.cam_x - target_x).abs() < 0.05 {
+                self.cam_x = target_x;
+            }
+        }
+        // vertical: follow jumps once above the floor tension line
+        let target_y = if highest < -self.cam_floortension {
+            (highest * self.cam_vfollow).max(self.cam_bound_high).min(0.0)
+        } else {
+            0.0
+        };
+        let f = if target_y < self.cam_y { 0.55 } else { 0.18 };
+        self.cam_y += (target_y - self.cam_y) * f;
+        if (self.cam_y - target_y).abs() < 0.05 {
+            self.cam_y = target_y;
         }
     }
 
@@ -1505,6 +1586,7 @@ impl Fight {
                 continue;
             }
             self.action_prepare(i);
+            self.auto_turn(i);
             self.action_run(i);
             self.pos_update(i);
             // anim advance + timers
@@ -1519,6 +1601,9 @@ impl Fight {
             self.hit_detection();
         }
 
+        // camera follow (after physics + hits settle positions)
+        self.camera_update();
+
         // round timers / KO
         if round_live {
             self.cur_round_time -= 1;
@@ -1528,15 +1613,98 @@ impl Fight {
                 }
             }
             let any_dead = self.chars.iter().any(|c| !c.alive);
-            if any_dead || self.cur_round_time <= 0 {
+            let timeout = self.cur_round_time <= 0;
+            if any_dead || timeout {
                 self.round_state = 3;
-                // winner bookkeeping
+                self.over_timer = 0;
+                // winner bookkeeping: KO first, then time-out by life
+                // fraction (draw round: both sides score, system.go 1894)
                 if self.chars[0].alive && !self.chars[1].alive {
                     self.wins[0] += 1;
                 } else if self.chars[1].alive && !self.chars[0].alive {
                     self.wins[1] += 1;
+                } else if timeout && self.chars[0].alive && self.chars[1].alive {
+                    let f0 = self.chars[0].life as f32 / self.chars[0].life_max as f32;
+                    let f1 = self.chars[1].life as f32 / self.chars[1].life_max as f32;
+                    if f0 > f1 {
+                        self.wins[0] += 1;
+                    } else if f1 > f0 {
+                        self.wins[1] += 1;
+                    } else {
+                        self.wins[0] += 1;
+                        self.wins[1] += 1;
+                    }
                 }
             }
+        } else if self.round_state == 3 {
+            // over grace (system.go: 3 over → round over), then next round
+            // or match end when someone reaches max_wins
+            self.over_timer += 1;
+            if self.over_timer > self.over_waittime {
+                if self.wins[0] >= self.max_wins || self.wins[1] >= self.max_wins {
+                    self.finished = true;
+                } else {
+                    self.start_round();
+                }
+            }
+        }
+    }
+
+    /// Begin the next round (system.go roundReset): fighters back to their
+    /// start positions, life refilled, power kept, short intro, timer reset.
+    fn start_round(&mut self) {
+        self.round_no += 1;
+        self.intro_time = 30;
+        self.round_state = 0;
+        self.over_timer = 0;
+        self.cur_round_time = self.match_time;
+        self.cam_x = 0.0;
+        self.cam_y = 0.0;
+        let starts = [(self.chars[0].start_pos, 1), (self.chars[1].start_pos, -1)];
+        for (i, (x, face)) in starts.iter().enumerate() {
+            let c = &mut self.chars[i];
+            c.pos = [*x, 0.0, 0.0];
+            c.vel = [0.0, 0.0, 0.0];
+            c.facing = *face;
+            c.life = c.life_max;
+            c.alive = true;
+            c.ctrl = false;
+            c.hitpause_time = 0;
+            c.hitdef = None;
+            c.move_type = MoveTypeT::I;
+            c.pending_state = None;
+            c.time_in_state = 0;
+            c.cmd_list.buf_reset();
+            c.set_anim(0);
+            c.change_state(0);
+        }
+    }
+
+    /// Engine auto-turn (char.go): with ctrl on the ground, the char faces
+    /// the nearest opponent — common1's turn states (5/6) refine the anim.
+    fn auto_turn(&mut self, i: usize) {
+        let me_x = self.chars[i].pos[0];
+        let mut best: Option<(f32, usize)> = None; // (dist, idx)
+        for (j, c) in self.chars.iter().enumerate() {
+            if j == i || !c.alive || c.is_helper {
+                continue;
+            }
+            let d = (c.pos[0] - me_x).abs();
+            if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                best = Some((d, j));
+            }
+        }
+        let Some((dist, j)) = best else { return };
+        if dist < 0.5 {
+            return;
+        }
+        let toward = (self.chars[j].pos[0] - me_x).signum() as i32;
+        let c = &mut self.chars[i];
+        if c.ctrl
+            && (c.state_type == StateTypeT::S || c.state_type == StateTypeT::C)
+            && c.facing != toward
+        {
+            c.facing = toward;
         }
     }
 
@@ -1653,6 +1821,21 @@ impl Fight {
                     c.vel[1] = 0.0;
                     c.change_state(52);
                 }
+            }
+        }
+        // screen-edge push (char.go screenbound): chars stay within the
+        // camera view — 10px margin inside the 160px half-screen
+        let left = self.cam_x - 150.0;
+        let right = self.cam_x + 150.0;
+        if c.pos[0] < left {
+            c.pos[0] = left;
+            if c.vel[0] < 0.0 {
+                c.vel[0] = 0.0;
+            }
+        } else if c.pos[0] > right {
+            c.pos[0] = right;
+            if c.vel[0] > 0.0 {
+                c.vel[0] = 0.0;
             }
         }
     }
@@ -2011,11 +2194,13 @@ impl Fight {
     pub fn new_1v1(gi: std::sync::Arc<GlobalInfo>, seed: i32) -> Self {
         let mut c1 = CharState::new(gi.clone(), 0, 0, 1);
         c1.pos = [-60.0, 0.0, 0.0];
+        c1.start_pos = -60.0;
         c1.facing = 1;
         c1.init_commands();
         c1.set_anim(0);
         let mut c2 = CharState::new(gi, 1, 1, 2);
         c2.pos = [60.0, 0.0, 0.0];
+        c2.start_pos = 60.0;
         c2.facing = -1;
         c2.init_commands();
         c2.set_anim(0);
@@ -2064,6 +2249,9 @@ pub struct FightSnapshot {
     pub round_state: i32,
     pub round_no: i32,
     pub time_left: i32,
+    /// Camera scroll (stage space): draw world at (pos - cam)
+    pub cam_x: f32,
+    pub cam_y: f32,
 }
 
 impl Fight {
@@ -2138,6 +2326,8 @@ impl Fight {
             round_state: self.round_state,
             round_no: self.round_no,
             time_left: self.cur_round_time / 60,
+            cam_x: self.cam_x,
+            cam_y: self.cam_y,
         }
     }
 }

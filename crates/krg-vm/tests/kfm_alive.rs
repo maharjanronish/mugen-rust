@@ -156,3 +156,115 @@ fn kfm_light_punch_hits_p2() {
 // silence unused warnings for the helper
 #[allow(dead_code)]
 fn _keep(_: &CommandList) {}
+
+// ── fight camera (camera.go classic model) + P2 AI ──────────────────────────
+
+#[test]
+fn camera_follows_and_clamps_to_stage_bounds() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    // kfm stage [Camera]: boundleft=-150 boundright=150 boundhigh=-22
+    fight.set_stage_camera(-150.0, 150.0, -22.0, 0.2, 0.0);
+
+    for _ in 0..80 {
+        fight.step(&[none(), none()]); // intro
+    }
+    assert!((fight.cam_x).abs() < 0.5, "camera starts centered");
+
+    // walk P1 right: camera tracks the midpoint of both players
+    let mut input = none();
+    input[3] = true; // R
+    for _ in 0..40 {
+        fight.step(&[input, none()]);
+    }
+    assert!(fight.cam_x > 1.0, "camera follows the walk, cam_x={}", fight.cam_x);
+
+    // keep walking past the right bound: camera must clamp at boundright
+    for _ in 0..240 {
+        fight.step(&[input, none()]);
+    }
+    assert!(
+        fight.cam_x <= 150.0 + 0.01,
+        "camera clamped to boundright, cam_x={}",
+        fight.cam_x
+    );
+
+    // P1 is pushed by the screen edge (screenbound): stays inside the view
+    assert!(
+        fight.chars[0].pos[0] <= fight.cam_x + 150.0 + 0.01,
+        "P1 inside camera view: pos={} cam={}",
+        fight.chars[0].pos[0],
+        fight.cam_x
+    );
+}
+
+#[test]
+fn ai_opponent_actually_plays() {
+    use krg_vm::cmd::{AiInput, LehmerRng};
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 7);
+    fight.set_stage_camera(-150.0, 150.0, -22.0, 0.2, 0.0);
+
+    let mut ai = AiInput::default();
+    let mut rng = LehmerRng::new(99);
+    let mut p2_states_seen = std::collections::HashSet::new();
+    let mut p2_moved = false;
+    let x_before = fight.chars[1].pos[0];
+
+    for _ in 0..900 {
+        let intro = fight.round_state < 2;
+        ai.update(intro, 4.0, &mut rng);
+        fight.step(&[none(), ai.buttons()]);
+        p2_states_seen.insert(fight.chars[1].state_no);
+        if (fight.chars[1].pos[0] - x_before).abs() > 4.0 {
+            p2_moved = true;
+        }
+    }
+
+    // The jam AI (input.go:1941) wanders states: standing, walking, jumping,
+    // attacks — anything beyond the initial stand proves the bridge works.
+    assert!(
+        p2_states_seen.len() >= 3,
+        "AI visited {} states: {:?}",
+        p2_states_seen.len(),
+        p2_states_seen
+    );
+    assert!(p2_moved, "AI moved P2 (x={})", fight.chars[1].pos[0]);
+}
+
+#[test]
+fn full_ai_match_runs_rounds_to_completion() {
+    use krg_vm::cmd::{AiInput, LehmerRng};
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 123);
+    fight.set_stage_camera(-150.0, 150.0, -22.0, 0.2, 0.0);
+    fight.max_wins = 2;
+
+    let mut p1 = AiInput::default();
+    let mut p2 = AiInput::default();
+    let mut rng = LehmerRng::new(123);
+    let mut rounds_seen = std::collections::HashSet::new();
+
+    for _ in 0..60 * 60 * 12 {
+        // 12 min max
+        if fight.finished {
+            break;
+        }
+        let intro = fight.round_state < 2;
+        p1.update(intro, 4.0, &mut rng);
+        p2.update(intro, 4.0, &mut rng);
+        fight.step(&[p1.buttons(), p2.buttons()]);
+        rounds_seen.insert(fight.round_no);
+    }
+
+    assert!(fight.finished, "match ends within the time budget");
+    assert!(
+        fight.wins[0] == fight.max_wins || fight.wins[1] == fight.max_wins,
+        "someone took the match: {:?}",
+        fight.wins
+    );
+    assert!(rounds_seen.len() >= 2, "at least two rounds happened");
+    // after a mid-match reset, both fighters start the round at full life
+    // (the final round may end mid-life for the winner)
+    assert!(fight.round_no >= 2);
+}

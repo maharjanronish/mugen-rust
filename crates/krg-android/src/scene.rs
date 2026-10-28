@@ -84,6 +84,10 @@ struct FightRun {
     fight: Fight,
     /// 60Hz tick accumulator (ms).
     tick_acc: f64,
+    /// P2 CPU (input.go:1941 AiInput) — jam-based button/dir generator
+    ai: krg_vm::cmd::AiInput,
+    ai_rng: krg_vm::cmd::LehmerRng,
+    ai_level: f32,
 }
 
 impl FightRun {
@@ -145,7 +149,13 @@ impl FightRun {
         .map_err(|e| log::warn!("scene: char compile: {e}"))
         .ok()?;
         let fight = Fight::new_1v1(gi, 42);
-        Some(FightRun { fight, tick_acc: 0.0 })
+        Some(FightRun {
+            fight,
+            tick_acc: 0.0,
+            ai: krg_vm::cmd::AiInput::default(),
+            ai_rng: krg_vm::cmd::LehmerRng::new(4242),
+            ai_level: 3.0,
+        })
     }
 }
 
@@ -217,7 +227,17 @@ impl Scene {
 
         let stage = find_stage(root);
         let font = find_font(root);
-        let fight = FightRun::load(root);
+        let mut fight = FightRun::load(root);
+        // stage camera bounds (StageDef [Camera], scaled to 320-space)
+        if let (Some(fr), Some(st)) = (fight.as_mut(), stage.as_ref()) {
+            fr.fight.set_stage_camera(
+                st.def.boundleft as f32 * st.scl,
+                st.def.boundright as f32 * st.scl,
+                st.def.boundhigh as f32 * st.scl,
+                st.def.verticalfollow,
+                st.def.floortension as f32,
+            );
+        }
 
         // Fighter placement: stage data when present, template defaults.
         let (p1, p2) = match &stage {
@@ -345,7 +365,17 @@ impl Scene {
                     let mut ticks = 0;
                     while fr.tick_acc >= MS && ticks < 4 {
                         fr.tick_acc -= MS;
-                        fr.fight.step_bits(held, 0); // P2 idle for now
+                        // P2 CPU: AiInput jam feeds raw input bits
+                        let intro = fr.fight.round_state < 2;
+                        fr.ai.update(intro, fr.ai_level, &mut fr.ai_rng);
+                        let b = fr.ai.buttons();
+                        let mut p2 = 0u32;
+                        for (i, on) in b.iter().enumerate() {
+                            if *on {
+                                p2 |= 1 << i;
+                            }
+                        }
+                        fr.fight.step_bits(held, p2);
                         ticks += 1;
                     }
                 }
@@ -357,8 +387,8 @@ impl Scene {
     // ── menu ────────────────────────────────────────────────────────────────
 
     fn draw_menu(&mut self, r: &mut Renderer) {
-        self.draw_stage_layer(r, 0);
-        self.draw_stage_layer(r, 1);
+        self.draw_stage_layer(r, 0, 0.0, 0.0);
+        self.draw_stage_layer(r, 1, 0.0, 0.0);
         // Dim the stage behind the menu.
         let q = full_screen_quad([0, 0, 0, 170]);
         r.push(0, &q);
@@ -389,51 +419,21 @@ impl Scene {
     // ── fight ───────────────────────────────────────────────────────────────
 
     fn draw_fight(&mut self, r: &mut Renderer) {
-        self.draw_stage_layer(r, 0);
-
-        let scl = self.stage.as_ref().map(|s| s.scl).unwrap_or(1.0);
-        if let Some(fr) = self.fight.as_mut() {
-            // ── live krg-vm fighters ────────────────────────────────────
-            let snap = fr.fight.snapshot();
-            let ground_y = self.stage.as_ref().map(|s| s.def.zoffset as f32 * s.scl)
-                .unwrap_or(GAME_H - 32.0);
-            for cd in &snap.chars {
-                let Some(a) = fr.fight.chars[0].gi.anims.anims.get(&cd.anim_no) else {
-                    continue;
-                };
-                let Some(f) = a.frames.get(cd.frame_idx.max(0) as usize) else {
-                    continue;
-                };
-                if f.group < 0 {
-                    continue;
-                }
-                let xs = f.hscale as f32 * f.xscale * cd.xscale * cd.facing as f32 * scl;
-                let ys = f.vscale as f32 * f.yscale * cd.yscale * scl;
-                let blend = if f.trans_type == TransType::Add {
-                    BLENDS_ADD
-                } else {
-                    BLENDS_ALPHA
-                };
-                let _ = r.push_sprite(
-                    &mut self.char_cache,
-                    SRC_CHAR,
-                    f.group as u16,
-                    f.number as u16,
-                    GAME_W / 2.0 + cd.pos[0] * scl,
-                    ground_y - cd.pos[1] * scl,
-                    xs,
-                    ys,
-                    WHITE,
-                    blend,
-                );
-            }
-            self.draw_stage_layer(r, 1);
+        // Live runtime path: snapshot (borrows end here), then draw with it
+        let live = self.fight.as_ref().map(|fr| {
+            (fr.fight.snapshot(), fr.fight.chars[0].gi.clone())
+        });
+        if let Some((snap, gi)) = live {
+            self.draw_stage_layer(r, 0, snap.cam_x, snap.cam_y);
+            self.draw_fight_chars(r, &snap, &gi);
+            self.draw_stage_layer(r, 1, snap.cam_x, snap.cam_y);
             self.draw_hud(r, &snap);
             return;
         }
 
-        // ── static fallback demo ─────────────────────────────────────────
-        // Fighters (shared kfm standing anim, mirrored for P2).
+        // ── static fallback demo (no compiled char) ─────────────────────
+        let scl = self.stage.as_ref().map(|s| s.scl).unwrap_or(1.0);
+        self.draw_stage_layer(r, 0, 0.0, 0.0);
         let i = self.frame_at(self.t_ms).min(self.anim.frames.len() - 1);
         let f = &self.anim.frames[i];
         if f.group >= 0 && f.number >= 0 {
@@ -460,7 +460,7 @@ impl Scene {
             }
         }
 
-        self.draw_stage_layer(r, 1);
+        self.draw_stage_layer(r, 1, 0.0, 0.0);
 
         // Corner hint (back to menu).
         if let Some(fr) = self.font.as_ref() {
@@ -469,11 +469,51 @@ impl Scene {
         }
     }
 
-    // ── HUD ───────────────────────────────────────────────────────────────────
+    /// Draw the live fighters from a fight snapshot, camera-scrolled.
+    fn draw_fight_chars(
+        &mut self,
+        r: &mut Renderer,
+        snap: &krg_vm::runtime::FightSnapshot,
+        gi: &std::sync::Arc<krg_vm::runtime::GlobalInfo>,
+    ) {
+        let scl = self.stage.as_ref().map(|s| s.scl).unwrap_or(1.0);
+        let ground_y = self
+            .stage
+            .as_ref()
+            .map(|s| s.def.zoffset as f32 * s.scl)
+            .unwrap_or(GAME_H - 32.0);
+        for cd in &snap.chars {
+            let Some(a) = gi.anims.anims.get(&cd.anim_no) else {
+                continue;
+            };
+            let Some(f) = a.frames.get(cd.frame_idx.max(0) as usize) else {
+                continue;
+            };
+            if f.group < 0 {
+                continue;
+            }
+            let xs = f.hscale as f32 * f.xscale * cd.xscale * cd.facing as f32 * scl;
+            let ys = f.vscale as f32 * f.yscale * cd.yscale * scl;
+            let blend = if f.trans_type == TransType::Add {
+                BLENDS_ADD
+            } else {
+                BLENDS_ALPHA
+            };
+            let _ = r.push_sprite(
+                &mut self.char_cache,
+                SRC_CHAR,
+                f.group as u16,
+                f.number as u16,
+                GAME_W / 2.0 + (cd.pos[0] - snap.cam_x) * scl,
+                ground_y - cd.pos[1] * scl - snap.cam_y * scl,
+                xs,
+                ys,
+                WHITE,
+                blend,
+            );
+        }
+    }
 
-    /// The fight HUD: life bars (P1 left, P2 right), power bars, timer.
-    /// First real fight-screen milestone — the motif-driven bars land with
-    /// the fightscreen port.
     fn draw_hud(&mut self, r: &mut Renderer, snap: &krg_vm::runtime::FightSnapshot) {
         const BAR_Y: f32 = 8.0;
         const BAR_W: f32 = 110.0;
@@ -561,7 +601,7 @@ impl Scene {
     /// center) scaled by `scl` for HiRes stages. Parallax is approximated
     /// with its bottom xscale (the true trapezoid needs a vertex-format
     /// extension; tracked for the next renderer milestone).
-    fn draw_stage_layer(&mut self, r: &mut Renderer, layer: i32) {
+    fn draw_stage_layer(&mut self, r: &mut Renderer, layer: i32, cam_x: f32, cam_y: f32) {
         let Some(st) = self.stage.as_mut() else {
             return;
         };
@@ -578,8 +618,8 @@ impl Scene {
                 continue;
             }
             let scl = st.scl;
-            let x = GAME_W / 2.0 + bg.start[0] * scl;
-            let y = bg.start[1] * scl;
+            let x = GAME_W / 2.0 + bg.start[0] * scl - cam_x * scl;
+            let y = bg.start[1] * scl - cam_y * scl;
             let xs = if bg.ty == BgType::Parallax {
                 parallax_scale(bg, w)
             } else {

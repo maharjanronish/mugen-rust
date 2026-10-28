@@ -108,6 +108,10 @@ pub struct StageDef {
     pub boundleft: i32,
     pub boundright: i32,
     pub boundhigh: i32,
+    /// `[Camera] verticalfollow` — jump follow factor (kfm.def: 0.2)
+    pub verticalfollow: f32,
+    /// `[Camera] floortension` — follow after this height above ground
+    pub floortension: i32,
     /// `[PlayerInfo]` — x relative to screen center, y from top.
     pub p1start: [f32; 2],
     pub p1facing: f32,
@@ -128,6 +132,8 @@ impl Default for StageDef {
             boundleft: -150,
             boundright: 150,
             boundhigh: -25,
+            verticalfollow: 0.2,
+            floortension: 0,
             p1start: [-70.0, 0.0],
             p1facing: 1.0,
             p2start: [70.0, 0.0],
@@ -222,6 +228,12 @@ impl StageDef {
                     }
                     if let Some(v) = kv.get("boundhigh") {
                         def.boundhigh = atoi(v);
+                    }
+                    if let Some(v) = kv.get("verticalfollow") {
+                        def.verticalfollow = f32_at(v, 0);
+                    }
+                    if let Some(v) = kv.get("floortension") {
+                        def.floortension = atoi(v);
                     }
                 }
                 "playerinfo" => {
