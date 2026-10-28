@@ -10,8 +10,8 @@ android {
         applicationId = "com.kurogane.engine"
         minSdk = 26      // Android 8.0 — the project's floor (AAudio availability)
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         ndk {
             // ABI filter matches the .so set produced by cargo-ndk.
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")

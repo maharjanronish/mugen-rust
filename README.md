@@ -101,8 +101,33 @@ Output: `android/app/build/outputs/apk/debug/app-debug.apk`
 **CI**: every push to `main` runs the test suite and builds a debug APK —
 see the *Actions* tab → `android-apk` → artifact `kurogane-debug-apk`.
 
-Content goes in `Android/data/com.kurogane.engine/files/data/` (same layout
-as the Ikemen GO Android port).
+## Getting MUGEN content onto the device
+
+On first launch the app asks for storage access (classic permission dialog
+on Android 8/9, the *All files access* toggle on Android 10+) and then scans,
+in order:
+
+1. `/storage/emulated/0/Kurogane` — **recommended**; any file manager works
+2. `/storage/emulated/0/IkemenGO` — an existing Ikemen GO data folder is
+   auto-detected
+3. `Android/data/com.kurogane.engine/files/` — USB/ADB fallback
+
+**Base data** — what the engine itself needs — is the `data/` and `font/`
+folders from an [Ikemen GO release zip](https://github.com/ikemen-engine/Ikemen-GO/releases)
+(or from a MUGEN 1.0/1.1 install). Drop them in so the folder looks like:
+
+```
+/storage/emulated/0/Kurogane/
+  data/    system.def, fight.def, select.def, common1.cns …  (screenpack)
+  font/    default fonts
+  chars/   your characters — one folder each, containing a .def
+  stages/  your stages (.def + .sff)
+```
+
+A screenpack (`data/system.def`) is the minimum for the scanner to accept a
+folder as content. The launcher reports what it found (character/stage/font
+counts, parsed SFF/AIR samples) on the HUD; the setup screen's **RESCAN**
+button re-checks after you add files.
 
 ## Host-side checks (CI)
 
