@@ -15,8 +15,8 @@ be audited line-by-line against the Go source.
 MUGEN content can require up to **14 input signals** (6 attack buttons, 4
 directions, start, plus Ikemen's extra `d`/`w`/`m` buttons). Kurogane ships
 the classic **six-button layout** (punch row **X Y Z**, kick row **A B C**) and
-still synthesizes the Ikemen extras as simultaneous-press **chords**. Both
-signals are emitted at once, so `QCF+Z`-style *and* `X+Y`-style commands all
+synthesizes the remaining signals as simultaneous-press **chords** — the
+pressed buttons stay on, so `QCF+Z`-style *and* `X+Y`-style commands all
 fire:
 
 ```
@@ -32,7 +32,7 @@ fire:
 | Physical | Emits |
 |---|---|
 | **X/Y/Z** punches · **A/B/C** kicks | the six attack signals directly |
-| X+Y together | + **Z** · A+B together | + **C** (chords still work) |
+| any two of X, Y, Z | + the **missing punch** · any two of A, B, C | + the **missing kick** |
 | A+X together | + **D** · B+Y together | + **W** (Ikemen extras) |
 | A+B+X+Y (all four) | + **M** |
 | START | **S** |
@@ -44,9 +44,7 @@ stream, so no hidden controller magic is needed or wanted.
 
 ### Editing the layout
 
-Tap the small **EDIT** button (beside START), or **hold START** (~0.5 s) to
-open the editor — START is the one control no gameplay ever holds, so the
-editor can never trigger mid-fight:
+Tap the small **EDIT** button (beside START) to open the editor:
 
 * **drag** any control to move it (centers are stored normalized — the layout
   survives rotation and device changes)

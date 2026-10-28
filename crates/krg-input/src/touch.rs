@@ -12,8 +12,8 @@
 //! |---|---|
 //! | X / Y / Z (punch row) | X, Y, Z directly |
 //! | A / B / C (kick row)  | A, B, C directly |
-//! | X+Y together | + Z |
-//! | A+B together | + C |
+//! | Any two of X, Y, Z together | + the missing punch |
+//! | Any two of A, B, C together | + the missing kick |
 //! | A+X together | + D (Ikemen extra) |
 //! | B+Y together | + W (Ikemen extra) |
 //! | A+B+X+Y all four | + M (Ikemen extra) |
@@ -363,20 +363,23 @@ impl TouchController {
 
     /// Advance one frame: synthesize chords, update edges, return held bits.
     pub fn tick(&mut self) -> u32 {
-        let mut out = self.raw_btns;
-        if out & bits::X != 0 && out & bits::Y != 0 {
-            out |= bits::Z;
-        }
-        if out & bits::A != 0 && out & bits::B != 0 {
-            out |= bits::C;
-        }
-        if out & bits::A != 0 && out & bits::X != 0 {
+        // Chords derive from the *physical* bits only, so a synthesized
+        // button never feeds another chord (the X synthesized from Y+Z
+        // cannot fire the A+X→D chord, for instance).
+        let raw = self.raw_btns;
+        let mut out = raw;
+        // Any two of a row → the missing one joins the pair: X+Y→+Z,
+        // Y+Z→+X, Z+X→+Y (and likewise for kicks), so every two-button
+        // shortcut works whichever pair the fingers happen to land on.
+        out |= synth_triple(raw, bits::X, bits::Y, bits::Z);
+        out |= synth_triple(raw, bits::A, bits::B, bits::C);
+        if raw & bits::A != 0 && raw & bits::X != 0 {
             out |= bits::D;
         }
-        if out & bits::B != 0 && out & bits::Y != 0 {
+        if raw & bits::B != 0 && raw & bits::Y != 0 {
             out |= bits::W;
         }
-        if out & (bits::A | bits::B | bits::X | bits::Y) == (bits::A | bits::B | bits::X | bits::Y)
+        if raw & (bits::A | bits::B | bits::X | bits::Y) == (bits::A | bits::B | bits::X | bits::Y)
         {
             out |= bits::M;
         }
@@ -626,6 +629,18 @@ fn dir_y(dirs: u32) -> f32 {
     (dirs & bits::PD != 0) as i32 as f32 - (dirs & bits::PU != 0) as i32 as f32
 }
 
+/// Two of a triple held → the remaining one joins the emission (the pressed
+/// pair stays on, so `X+Y`-style commands still fire while the chord also
+/// yields the third signal: `X+Y`→+Z, `Y+Z`→+X, `Z+X`→+Y).
+fn synth_triple(held: u32, a: u32, b: u32, c: u32) -> u32 {
+    let n = (held & a != 0) as u32 + (held & b != 0) as u32 + (held & c != 0) as u32;
+    if n >= 2 {
+        a | b | c
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +705,50 @@ mod tests {
         c.touch(1, TouchPhase::Down, ax, ay, SW, SH);
         c.touch(2, TouchPhase::Down, bx, by, SW, SH);
         assert_eq!(c.tick(), A | B | C);
+    }
+
+    #[test]
+    fn chord_yz_emits_x() {
+        let mut c = TouchController::new();
+        let (yx, yy) = btn_xy(&c, Y);
+        let (zx, zy) = btn_xy(&c, Z);
+        c.touch(1, TouchPhase::Down, yx, yy, SW, SH);
+        c.touch(2, TouchPhase::Down, zx, zy, SW, SH);
+        // The missing punch of any held pair joins: Y+Z → +X.
+        assert_eq!(c.tick(), X | Y | Z);
+        c.touch(2, TouchPhase::Up, zx, zy, SW, SH);
+        assert_eq!(c.tick(), Y);
+    }
+
+    #[test]
+    fn chord_xz_emits_y_and_bc_emits_a() {
+        let mut c = TouchController::new();
+        let (xx, xy) = btn_xy(&c, X);
+        let (zx, zy) = btn_xy(&c, Z);
+        c.touch(1, TouchPhase::Down, xx, xy, SW, SH);
+        c.touch(2, TouchPhase::Down, zx, zy, SW, SH);
+        assert_eq!(c.tick(), X | Y | Z);
+        c.touch(1, TouchPhase::Up, xx, xy, SW, SH);
+        c.touch(2, TouchPhase::Up, zx, zy, SW, SH);
+        let (bx, by) = btn_xy(&c, B);
+        let (cx, cy) = btn_xy(&c, C);
+        c.touch(3, TouchPhase::Down, bx, by, SW, SH);
+        c.touch(4, TouchPhase::Down, cx, cy, SW, SH);
+        assert_eq!(c.tick(), A | B | C);
+    }
+
+    #[test]
+    fn synthesized_bit_does_not_cascade() {
+        let mut c = TouchController::new();
+        let (ax, ay) = btn_xy(&c, A);
+        let (yx, yy) = btn_xy(&c, Y);
+        let (zx, zy) = btn_xy(&c, Z);
+        c.touch(1, TouchPhase::Down, ax, ay, SW, SH);
+        c.touch(2, TouchPhase::Down, yx, yy, SW, SH);
+        c.touch(3, TouchPhase::Down, zx, zy, SW, SH);
+        // Y+Z synthesizes X, but chords read physical bits only — D needs
+        // a real A+X press, so it must NOT fire here.
+        assert_eq!(c.tick(), A | X | Y | Z);
     }
 
     #[test]

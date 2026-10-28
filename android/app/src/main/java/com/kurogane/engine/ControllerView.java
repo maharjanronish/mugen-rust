@@ -7,8 +7,6 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.Choreographer;
 import android.view.MotionEvent;
 import android.view.View;
@@ -20,11 +18,12 @@ import java.io.File;
  *
  * With content present: the fighting controller. Everything that matters
  * lives in Rust (krg-input): zone geometry, hit testing, chord synthesis
- * (X+Y→Z, A+B→C, A+X→D, B+Y→W, all-four→M). This view forwards touches and
- * renders what Rust computes — one source of truth.
+ * (any two punches add the missing one, likewise kicks; A+X→D, B+Y→W,
+ * all-four→M). This view forwards touches and renders what Rust
+ * computes — one source of truth.
  *
- * The layout is user-editable: tap the small EDIT button (beside START), or
- * hold START (~0.55 s). In edit mode you drag controls to move them, pinch
+ * The layout is user-editable: tap the small EDIT button (beside START).
+ * In edit mode you drag controls to move them, pinch
  * (or the −/+ steppers) to resize, DEFAULTS restores the factory layout,
  * and SAVE/CANCEL commits or discards. The layout persists in
  * files/controller.ini and is restored on startup.
@@ -50,12 +49,6 @@ public final class ControllerView extends View {
 
     private static final int BG = 0xFF0E0E12;
     private static final int ACCENT = 0xFFD2232A;
-
-    /** Hold START this long (ms) to open the layout editor — START is the one
-     *  control no gameplay ever holds, so the editor can't trigger mid-fight.
-     *  + slop (px) before a gesture counts as a drag instead. */
-    private static final long EDIT_LONGPRESS_MS = 550L;
-    private static final float EDIT_LONGPRESS_SLOP = 24f;
 
     /** EDIT toggle placement (normalized; sits beside START, top-right). */
     private static final float EDIT_CX = 0.845f;
@@ -113,21 +106,6 @@ public final class ControllerView extends View {
     /** Two fingers down → pinch-resize the selection. */
     private boolean pinching = false;
     private float pinchSpan = 0f;
-    /** Long-press watch (play mode): pointer id + down position. */
-    private int lpPointer = -1;
-    private float lpX = 0f;
-    private float lpY = 0f;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable longPressRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (!editMode && lpPointer >= 0) {
-                // The finger stays down: it becomes the drag of the control
-                // it was holding.
-                enterEditMode(lpPointer, lpX, lpY);
-            }
-        }
-    };
 
     /** Persisted controller layout (files/controller.ini). */
     private final String layoutPath;
@@ -216,7 +194,6 @@ public final class ControllerView extends View {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         choreographer.removeFrameCallback(frameCb);
-        cancelHoldDetect();
     }
 
     @Override
@@ -248,26 +225,13 @@ public final class ControllerView extends View {
                 float x = e.getX(idx);
                 float y = e.getY(idx);
                 if (hitEditButton(x, y)) {
-                    enterEditMode(-1, 0f, 0f);
+                    enterEditMode();
                     return true;
                 }
                 send(e, idx, 0);
-                // Editor entry via hold: START only — attack buttons and the pad
-                // are held during real gameplay (blocking, charging) and must
-                // never open the editor mid-fight.
-                int[] z = pickZone(x, y);
-                if (z != null && z[0] == ZONE_START) {
-                    armLongPress(e.getPointerId(idx), x, y);
-                }
                 break;
             }
             case MotionEvent.ACTION_MOVE: {
-                if (lpPointer >= 0) {
-                    int i = e.findPointerIndex(lpPointer);
-                    if (i < 0 || Math.hypot(e.getX(i) - lpX, e.getY(i) - lpY) > EDIT_LONGPRESS_SLOP) {
-                        cancelHoldDetect();
-                    }
-                }
                 for (int i = 0; i < e.getPointerCount(); i++) {
                     send(e, i, 1);
                 }
@@ -275,11 +239,9 @@ public final class ControllerView extends View {
             }
             case MotionEvent.ACTION_POINTER_UP:
             case MotionEvent.ACTION_UP:
-                cancelHoldDetect();
                 send(e, idx, 2);
                 break;
             case MotionEvent.ACTION_CANCEL:
-                cancelHoldDetect();
                 for (int i = 0; i < e.getPointerCount(); i++) {
                     send(e, i, 2);
                 }
@@ -288,24 +250,8 @@ public final class ControllerView extends View {
         return true;
     }
 
-    private void armLongPress(int pointerId, float x, float y) {
-        cancelHoldDetect();
-        lpPointer = pointerId;
-        lpX = x;
-        lpY = y;
-        handler.postDelayed(longPressRunnable, EDIT_LONGPRESS_MS);
-    }
-
-    // NB: deliberately NOT named cancelLongPress() — that exists as public on
-    // android.view.View, and a weaker-access override fails compilation.
-    private void cancelHoldDetect() {
-        handler.removeCallbacks(longPressRunnable);
-        lpPointer = -1;
-    }
-
-    /** Open the editor. `grabPointer` (if >= 0) keeps dragging the control at (x, y). */
-    private void enterEditMode(int grabPointer, float x, float y) {
-        cancelHoldDetect();
+    /** Open the editor: snapshot the layout, clear held buttons, show toolbar. */
+    private void enterEditMode() {
         nativeInputEditBegin(); // Rust snapshots the layout + clears held buttons
         editMode = true;
         selKind = -1;
@@ -313,17 +259,6 @@ public final class ControllerView extends View {
         dragPointer = -1;
         pinching = false;
         pinchSpan = 0f;
-        if (grabPointer >= 0) {
-            int[] z = pickZone(x, y);
-            if (z != null) {
-                selKind = z[0];
-                selParam = z[1];
-                float[] c = zoneCenter(selKind, selParam);
-                grabDx = c[0] - x;
-                grabDy = c[1] - y;
-                dragPointer = grabPointer;
-            }
-        }
         invalidate();
     }
 
