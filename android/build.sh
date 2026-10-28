@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$ROOT"
 
-ABIS="${ABIS:-arm64-v8a,armeabi-v7a,x86_64,i686}"
+ABIS="${ABIS:-arm64-v8a,armeabi-v7a,x86_64,x86}"
 GRADLE_TASK="assembleDebug"
 PROFILE_FLAG=("--release")
 

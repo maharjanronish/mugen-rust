@@ -36,13 +36,14 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platform-tools" "platforms;android-34" "build-tools;34.0.0" \
             "ndk;26.3.11579264" > /dev/null
+          # Runner-level $ANDROID_HOME is not in the Actions `env` context,
+          # so it must be expanded in the shell and exported via GITHUB_ENV.
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
 
       - name: Build native library (all ABIs)
         run: |
-          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t i686 \
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
             -o android/app/src/main/jniLibs build --release -p krg-android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
 
       - uses: gradle/actions/setup-gradle@v3
         with:
