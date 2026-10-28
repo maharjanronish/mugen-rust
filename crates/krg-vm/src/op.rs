@@ -135,6 +135,8 @@ pub enum Trig {
     PosY,           // OC_pos_y
     VelX,           // OC_vel_x
     VelY,           // OC_vel_y
+    VelZ,           // OC_vel_z (Ikemen z-axis)
+    PosZ,            // OC_pos_z (Ikemen z-axis)
     BackEdge,       // OC_backedge
     BackEdgeDist,   // OC_backedgedist
     BackEdgeBodyDist,
@@ -143,6 +145,8 @@ pub enum Trig {
     FrontEdgeBodyDist,
     ScreenPosX,     // OC_screenpos_x
     ScreenPosY,     // OC_screenpos_y
+    CameraPosX,     // OC_camerapos_x (Ikemen)
+    CameraPosY,
     // meters
     Life,           // OC_life
     LifeMax,        // OC_lifemax
@@ -160,7 +164,8 @@ pub enum Trig {
     HitShakeOver,   // OC_hitshakeover
     HitOver,        // OC_hitover
     HitFall,        // OC_hitfall
-    HitDefAttr,     // OC_hitdefattr (attr-compare string form)
+    HitDefAttr,     // OC_hitdefattr bare form (attr as string)
+    HitDefAttrCmp,  // pops kind,stat masks → bool (compile-time masks)
     HitVelX,        // OC_hitvel_x
     HitVelY,        // OC_hitvel_y
     MoveContact,    // OC_movecontact
@@ -185,10 +190,23 @@ pub enum Trig {
     TeamSide,       // OC_teamside
     PalNo,          // OC_palno
     // versions
-    MugenVersion,   // ex: [major, minor]
+    MugenVersion,   // major part (default)
+    MugenVersionMinor,
     IkemenVersion,
+    IkemenVersionMinor,
     InGuardDist,    // OC_inguarddist
     CanRecover,     // OC_canrecover
+    // Ikemen system triggers
+    RoundsExisted,
+    ConsecutiveWins,
+    MatchNo,
+    IsHomeTeam,
+    AiLevel,
+    Win,
+    WinClutch,
+    WinHyper,
+    WinPerfect,
+    WinSpecial,
     AnimLoopCount,
 }
 
@@ -225,6 +243,19 @@ pub enum GetHitVarKind {
     FallTime,
     Guarded,
     IsBound,
+    // extended fields (gethitvar: compiler.go current set)
+    AnimType2,          // air.animtype alias
+    XOff,
+    YOff,
+    ZOff,
+    XAccel,
+    YAccel,
+    ZAccel,
+    RecoverTime,        // down.recovertime alias / recovertime
+    Power,
+    HitPower,
+    Score,
+    Attr,
 }
 
 /// `const(...)` fields — only the ones used by KFM/common1; grows later.

@@ -20,9 +20,40 @@ pub trait CompileCtx {
     fn command_exists(&self, name: &str) -> bool;
     fn local_slot(&self, name: &str) -> Option<u8>;
     fn func_idx(&mut self, name: &str) -> usize;
+    /// Named constants (`const(StateStand)`, common.const [Constants]).
+    fn const_idx(&mut self, name: &str) -> Option<usize> {
+        let _ = name;
+        None
+    }
 }
 
 type R<T> = Result<T, String>;
+
+/// Names accepted after an FX prefix in param values (compiler.go
+/// triggerMap subset — the function-like triggers a param could legally
+/// start with). Used by sctrl.rs get_data_prefix.
+pub fn is_trigger_name(s: &str) -> bool {
+    matches!(
+        s,
+        "const" | "const240p" | "const480p" | "const720p" | "ifelse" | "cond"
+            | "var" | "fvar" | "sysvar" | "sysfvar" | "map" | "selfcommand"
+            | "abs" | "exp" | "ln" | "log" | "cos" | "sin" | "tan" | "sqrt"
+            | "floor" | "ceil" | "atan2" | "animelemtime" | "animelemno"
+            | "animelem" | "animexist" | "selfanimexist" | "random" | "teamside"
+            | "gethitvar" | "hitcount" | "uniqhitcount" | "helperid" | "parentdist"
+            | "rootdist" | "playeridexist" | "playerindexexist" | "numexplod"
+            | "numenemy" | "numpartner" | "numtarget" | "numhelper" | "projidexist"
+            | "projcontacttime" | "projguardtime" | "projhitnum" | "projhittime"
+            | "screenwidth" | "screenheight" | "stagevar" | "ailevelf" | "alpha"
+            | "analog" | "angle" | "xangle" | "yangle" | "animelemvar" | "animlength"
+            | "attack" | "attackmul" | "defence" | "defencemul" | "gametime"
+            | "ikemenversion" | "mugenversion" | "layerno" | "movehit" | "movecontact"
+            | "moveguarded" | "name" | "p2name" | "p3name" | "p4name" | "p5name"
+            | "p6name" | "p7name" | "p8name" | "pos" | "vel" | "stateno" | "time"
+            | "timemod" | "win" | "wintime" | "firstattack" | "movecountered"
+            | "hitoverridden" | "incustomstate" | "matchover" | "canrecover"
+    )
+}
 
 /// Ports CharCompiler's expression state (compiler.go:17).
 pub struct Compiler<'a> {
@@ -100,6 +131,12 @@ impl<'a> Compiler<'a> {
             return e(format!("Invalid data: {}", self.token));
         }
         Ok(be)
+    }
+
+    /// After [`Self::arg_expression`]: true when input still holds a `,`
+    /// (more args follow) — the `exprs` loop condition (compiler.go:6548).
+    pub fn trailing_comma(&self) -> bool {
+        self.token == ","
     }
 
     // ── the precedence chain ──────────────────────────────────────────────
@@ -433,6 +470,33 @@ impl<'a> Compiler<'a> {
                 return e("Not enclosed in \"");
             }
 
+            // ── unary minus (Go 1768) — fold "-4" or negate expression ──
+            "-" => {
+                let first = input.trim_start().bytes().next().unwrap_or(0);
+                if first.is_ascii_digit() || first == b'.' {
+                    // "-4" → negative constant
+                    let num = next_token_lower(input);
+                    self.token = format!("-{num}");
+                    let bv = self.number()
+                        .ok_or_else(|| format!("Invalid data: {}", self.token))?;
+                    self.tok(input);
+                    return Ok(bv);
+                } else {
+                    self.tok(input);
+                    let mut be1: BytecodeExp = Vec::new();
+                    let bv1 = self.exp_value(&mut be1, input)?;
+                    if bv1.is_none() {
+                        if be1.is_empty() {
+                            return e("Missing expression after '-'");
+                        }
+                        out.extend(be1);
+                        out.push(Op::Neg);
+                        return Ok(v_none());
+                    }
+                    return Ok(neg(&bv1));
+                }
+            }
+
             // ── unary ! (Go 1811) and parentheses (1829) ──────────────────
             "!" => {
                 self.tok(input);
@@ -465,7 +529,7 @@ impl<'a> Compiler<'a> {
             "animtime" => out.push(Op::Trig(Trig::AnimTime)),
             "stateno" => out.push(Op::Trig(Trig::StateNo)),
             "prevstateno" => out.push(Op::Trig(Trig::PrevStateNo)),
-            "time" => out.push(Op::Trig(Trig::Time)),
+            "time" | "statetime" => out.push(Op::Trig(Trig::Time)),
             "ctrl" => out.push(Op::Trig(Trig::Ctrl)),
             "ctrltime" => out.push(Op::Trig(Trig::CtrlTime)),
             "facing" => out.push(Op::Trig(Trig::Facing)),
@@ -509,6 +573,16 @@ impl<'a> Compiler<'a> {
             "palno" => out.push(Op::Trig(Trig::PalNo)),
             "inguarddist" => out.push(Op::Trig(Trig::InGuardDist)),
             "canrecover" => out.push(Op::Trig(Trig::CanRecover)),
+            "roundsexisted" => out.push(Op::Trig(Trig::RoundsExisted)),
+            "consecutivewins" => out.push(Op::Trig(Trig::ConsecutiveWins)),
+            "matchno" => out.push(Op::Trig(Trig::MatchNo)),
+            "ishometeam" => out.push(Op::Trig(Trig::IsHomeTeam)),
+            "ailevel" => out.push(Op::Trig(Trig::AiLevel)),
+            "win" => out.push(Op::Trig(Trig::Win)),
+            "winclutch" => out.push(Op::Trig(Trig::WinClutch)),
+            "winhyper" => out.push(Op::Trig(Trig::WinHyper)),
+            "winperfect" => out.push(Op::Trig(Trig::WinPerfect)),
+            "winspecial" => out.push(Op::Trig(Trig::WinSpecial)),
             "random" => out.push(Op::Trig(Trig::Random)),
             "animloopcount" => out.push(Op::Trig(Trig::AnimLoopCount)),
 
@@ -530,6 +604,7 @@ impl<'a> Compiler<'a> {
                 match self.token.as_str() {
                     "x" => out.push(Op::Trig(Trig::PosX)),
                     "y" => out.push(Op::Trig(Trig::PosY)),
+                    "z" => out.push(Op::Trig(Trig::PosZ)),
                     _ => return e(format!("Invalid Pos argument: {}", self.token)),
                 }
             }
@@ -538,6 +613,7 @@ impl<'a> Compiler<'a> {
                 match self.token.as_str() {
                     "x" => out.push(Op::Trig(Trig::VelX)),
                     "y" => out.push(Op::Trig(Trig::VelY)),
+                    "z" => out.push(Op::Trig(Trig::VelZ)),
                     _ => return e(format!("Invalid Vel argument: {}", self.token)),
                 }
             }
@@ -547,6 +623,14 @@ impl<'a> Compiler<'a> {
                     "x" => out.push(Op::Trig(Trig::ScreenPosX)),
                     "y" => out.push(Op::Trig(Trig::ScreenPosY)),
                     _ => return e(format!("Invalid ScreenPos argument: {}", self.token)),
+                }
+            }
+            "camerapos" => {
+                self.tok(input);
+                match self.token.as_str() {
+                    "x" => out.push(Op::Trig(Trig::CameraPosX)),
+                    "y" => out.push(Op::Trig(Trig::CameraPosY)),
+                    _ => return e(format!("Invalid CameraPos argument: {}", self.token)),
                 }
             }
             "hitvel" => {
@@ -581,8 +665,14 @@ impl<'a> Compiler<'a> {
             }
             "p2life" => out.push(Op::Trig(Trig::P2Life)),
             "p2stateno" => out.push(Op::Trig(Trig::P2StateNo)),
-            "p2statetype" => out.push(Op::Trig(Trig::P2StateType)),
-            "p2movetype" => out.push(Op::Trig(Trig::P2MoveType)),
+            "p2statetype" => {
+                self.flag_trigger(out, input, Trig::P2StateType)?;
+                return Ok(v_none());
+            }
+            "p2movetype" => {
+                self.flag_trigger(out, input, Trig::P2MoveType)?;
+                return Ok(v_none());
+            }
 
             // ── statetype / movetype — string comparisons ──────────────────
             // (Go: flagTrigger + pushSelf → OC_statetype etc. push strings)
@@ -636,32 +726,54 @@ impl<'a> Compiler<'a> {
 
             // ── old-style `animelem = N` (compiler.go:4297) ────────────────
             "animelem" => {
-                // parseOldAnimElemStyle: animelem = N  →  animelemtime(N) = 0
+                // parseOldAnimElemStyle (1296) + evaluateComparison (1057):
+                // `animelem = N`      → animelemtime(N) == 0
+                // `animelem = N, T`   → animelemtime(N) == T   (old style)
                 self.tok(input);
                 let is_eq = match self.token.as_str() {
-                    "=" => Some(true),
-                    "!=" => Some(false),
-                    _ => None,
+                    "=" => true,
+                    "!=" => false,
+                    _ => return e("AnimElem must be followed by = or !="),
                 };
-                if is_eq.is_none() {
-                    return e("AnimElem must be followed by = or !=");
-                }
                 self.tok(input);
                 let n = match self.token.parse::<i32>() {
                     Ok(n) if n > 0 => n,
                     _ => return e("AnimElem must be greater than 0"),
                 };
-                // emit [Push(n)][AnimElemTime][Jud(skip)][Push(0)][Eq/Ne]
-                let mut seq: BytecodeExp = vec![Op::Push(v_int(n)), Op::AnimElemTime];
-                let jud_at = out.len() + seq.len();
-                seq.push(Op::Jud(0)); // target patched below
-                let mut tail: BytecodeExp = vec![Op::Push(v_int(0))];
-                tail.push(if is_eq == Some(true) { Op::Eq } else { Op::Ne });
-                let target = jud_at + 1 + tail.len();
-                seq[2] = Op::Jud(target);
-                out.extend(seq);
-                out.extend(tail);
                 self.tok(input);
+                // Postfix order: [n][animelemtime] [rhs…] [compare-op]
+                // — LHS pushes first, RHS second, operator last.
+                let mut rhs: BytecodeExp = if self.token == "," {
+                    // old-style time offset with optional comparison
+                    // (evaluateComparison, compiler.go:1057): ", T" → == T,
+                    // ", >= T" → >= T, etc.
+                    self.tok(input);
+                    let cmp_op = match self.token.as_str() {
+                        "<" => Some(Op::Lt),
+                        ">" => Some(Op::Gt),
+                        "<=" => Some(Op::Le),
+                        ">=" => Some(Op::Ge),
+                        "=" => Some(Op::Eq),
+                        "!=" => Some(Op::Ne),
+                        _ => None,
+                    };
+                    let implied = if let Some(op) = cmp_op {
+                        self.tok(input);
+                        op
+                    } else {
+                        if is_eq { Op::Eq } else { Op::Ne }
+                    };
+                    let mut be: BytecodeExp = Vec::new();
+                    let bv = self.exp_adsb(&mut be, input)?;
+                    push_val(&mut be, &bv);
+                    be.push(implied);
+                    be
+                } else {
+                    vec![Op::Push(v_int(0)), if is_eq { Op::Eq } else { Op::Ne }]
+                };
+                out.push(Op::Push(v_int(n)));
+                out.push(Op::AnimElemTime);
+                out.extend(rhs.drain(..));
                 return Ok(v_none());
             }
 
@@ -745,6 +857,20 @@ impl<'a> Compiler<'a> {
                     "falltime" => GetHitVarKind::FallTime,
                     "guarded" => GetHitVarKind::Guarded,
                     "isbound" => GetHitVarKind::IsBound,
+                    "yaccel" => GetHitVarKind::YAccel,
+                    "xaccel" => GetHitVarKind::XAccel,
+                    "zaccel" => GetHitVarKind::ZAccel,
+                    "xoff" => GetHitVarKind::XOff,
+                    "yoff" => GetHitVarKind::YOff,
+                    "zoff" => GetHitVarKind::ZOff,
+                    "recovertime" => GetHitVarKind::RecoverTime,
+                    "power" => GetHitVarKind::Power,
+                    "hitpower" => GetHitVarKind::HitPower,
+                    "score" => GetHitVarKind::Score,
+                    "attr" => GetHitVarKind::Attr,
+                    "air.animtype" => GetHitVarKind::AnimType2,
+                    "fall.animtype" => GetHitVarKind::AnimType2,
+                    "ground.animtype" => GetHitVarKind::GroundType,
                     _ => return e(format!("Invalid GetHitVar argument: {}", self.token)),
                 };
                 self.tok(input);
@@ -874,11 +1000,29 @@ impl<'a> Compiler<'a> {
 
             // ── mugenVersion / ikemenversion (ZSS functions.zss) ─────────
             "mugenversion" | "ikemenversion" => {
-                out.push(Op::Trig(if tok == "mugenversion" {
-                    Trig::MugenVersion
-                } else {
-                    Trig::IkemenVersion
+                // (major) | (minor) — compiler.go mugenversion case
+                self.tok(input);
+                if self.token != "(" {
+                    return e(format!("Missing '(' after {}", tok));
+                }
+                self.tok(input);
+                let minor = match self.token.as_str() {
+                    "major" => false,
+                    "minor" => true,
+                    _ => return e(format!("Invalid MugenVersion argument: {}", self.token)),
+                };
+                self.tok(input);
+                if self.token != ")" {
+                    return e("Missing ')'");
+                }
+                out.push(Op::Trig(match (tok.as_str(), minor) {
+                    ("mugenversion", false) => Trig::MugenVersion,
+                    ("mugenversion", true) => Trig::MugenVersionMinor,
+                    (_, false) => Trig::IkemenVersion,
+                    (_, true) => Trig::IkemenVersionMinor,
                 }));
+                // falls to the shared tail (one more tok) — the '=' / '!='
+                // is handled by expEqne like other value triggers
             }
 
             // ── redirects: p2(expr) ────────────────────────────────────────
@@ -933,25 +1077,48 @@ impl<'a> Compiler<'a> {
 
             // ── hitdefattr = attr (compiler.go trgAttr) ───────────────────
             "hitdefattr" => {
-                // read `=` then attr text like SCA,NA,SA
+                // compiler.go:3028 — `hitdefattr = SC, NA, SA, HA`
+                // stateType part OR-matches; each `, kind` ORs into the
+                // kind mask; masks compared at runtime.
                 let is_eq = match self.peek_eqne(input)? {
                     Some(ne) => ne,
                     None => return e("No comparison operator after hitdefattr"),
                 };
-                self.tok(input);
-                self.tok(input);
-                let attr_text = self.token.clone();
-                // Go parses attr from raw text here (trgAttr)
-                let _ = attr_text;
-                // compile as: Trig(HitDefAttr) with attr string on stack
-                let idx = self.ctx.add_string(&attr_text);
-                out.push(Op::Push(v_string(idx)));
-                out.push(Op::Trig(Trig::HitDefAttr));
+                self.tok(input); // consume = / !=
+                self.tok(input); // stateType part (e.g. "SC")
+                let st_mask = crate::sctrl::attr_state_bits(&self.token);
+                let mut kind_mask = 0i32;
+                loop {
+                    let mut save = *input;
+                    if crate::lex::next_token_lower(&mut save) != "," {
+                        break;
+                    }
+                    *input = save; // the peek consumed the ','
+                    self.tok(input); // kind token
+                    kind_mask |= crate::sctrl::attr_kind_bits(&self.token);
+                }
+                out.push(Op::Push(v_int(st_mask)));
+                out.push(Op::Push(v_int(kind_mask)));
+                out.push(Op::Trig(Trig::HitDefAttrCmp));
                 if is_eq == Some(false) {
                     out.push(Op::Blnot);
                 }
-                self.tok(input);
+                self.tok(input); // standard tail: consume the follow token
                 return Ok(v_none());
+            }
+
+            // ── ZSS $locals (compiler.go:5647) ─────────────────────────────
+            _ if tok.starts_with('$') => {
+                let name = &tok[1..];
+                if name == "_" {
+                    // discard sink — reads 0
+                    out.push(Op::Push(v_int(0)));
+                } else {
+                    match self.ctx.local_slot(name) {
+                        Some(vi) => out.push(Op::LocalVar(vi)),
+                        None => return e(format!("{} is not defined", tok)),
+                    }
+                }
             }
 
             _ => {
@@ -1073,6 +1240,11 @@ impl<'a> Compiler<'a> {
     /// const(...) sub-keyword parsing (compiler.go:2244+)
     fn parse_const_kind(&mut self) -> R<ConstKind> {
         let k = ConstKind::from_name(&self.token);
+        if matches!(k, ConstKind::Unknown) {
+            if let Some(idx) = self.ctx.const_idx(&self.token) {
+                return Ok(ConstKind::Named(idx));
+            }
+        }
         Ok(k)
     }
 }

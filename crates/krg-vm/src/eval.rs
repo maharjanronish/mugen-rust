@@ -61,6 +61,12 @@ pub trait Ctx {
 
     // ── ZSS locals ────────────────────────────────────────────────────────
     fn local_get(&mut self, i: u8) -> Value;
+
+    /// hitdefattr mask check: current hitdef attr & (st, kind) —
+    /// `hitdefattr = SC, NA, SA, HA` (compiler.go:3028 mask form)
+    fn hitdefattr_check(&mut self, _st: i32, _kind: i32) -> bool {
+        false
+    }
 }
 
 /// Evaluate a compiled expression; returns its value.
@@ -227,6 +233,11 @@ pub fn eval_into(exp: &[Op], ctx: &mut dyn Ctx, stack: &mut Vec<Value>) {
             }
 
             // ── trigger reads ────────────────────────────────────────────
+            Op::Trig(Trig::HitDefAttrCmp) => {
+                let kind = stack.pop().map(|v| v.to_i()).unwrap_or(0);
+                let st = stack.pop().map(|v| v.to_i()).unwrap_or(0);
+                stack.push(v_bool(ctx.hitdefattr_check(st, kind)));
+            }
             Op::Trig(t) => stack.push(ctx.trig(*t)),
             Op::AnimElemTime => {
                 let n = stack.pop().map(|v| v.to_i()).unwrap_or(0);
