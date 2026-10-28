@@ -197,7 +197,10 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 | GLES 3.0 batched sprite renderer + LRU texture streaming | ✅ ported | krg-gfx: 20-byte vertices, run batching, FBO 320×240 + single upscale |
 | isActPal (0,0) palette reset | ✅ ported | load flag |
 | preloadSff / ACT palette preselect | ⏳ next | engine-layer milestone |
-| CNS/CMD bytecode, stages, sound, netplay | ⏳ roadmap | the big ones |
+| CNS/CMD state compiler + bytecode VM | ✅ v0.9 | kfm.cns/kfm.cmd/common1.cns.zss compile from the real v1.0.0 release |
+| Command system (input.go port) | ✅ v0.9 | SOCD/assist/charge/>/\$/\* syntax, buffer timers, .cmd compiler |
+| Char runtime: states, physics, hit detection, rounds, camera | ✅ v0.9 | KFM walks/crouches/jumps/punches; clsn hits, gethit, KO, next round, P2 CPU |
+| Sound, netplay | ⏳ roadmap | audio bridge is the next big one |
 
 ## Roadmap
 
@@ -207,9 +210,9 @@ cargo run --release -p krg-sfftool -- path/to/char.air
    camera (boundleft/right, zoom), true parallax trapezoids, GameActivity
 4. ~~DEF/INI stage + font rendering~~ ✅ (stage DEF, bitmap FNT v2) —
    next: motif `system.def` menus, TTF fonts
-5. CNS/CMD compiler + bytecode VM (the 48K-line core)
+5. ~~CNS/CMD compiler + bytecode VM~~ ✅ (the 48K-line core)
 6. Stage engine completion (bgctrl/velocity/animated BGs), audio
-   (AAudio/Oboe), input → engine wiring
+   (AAudio/Oboe) ← next, fight.def lifebars
 7. Rollback netcode (strict-IEEE, frame-hash parity harness)
 8. Lua scripting bridge (LuaJIT on arm64)
 
