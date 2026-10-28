@@ -35,6 +35,9 @@ cargo ndk "${NDK_ARGS[@]}" \
 echo "==> native libraries:"
 ls -la android/app/src/main/jniLibs/*/
 
+echo "==> bundling Ikemen GO base data into APK assets"
+./android/bundle-basedata.sh
+
 echo "==> gradle $GRADLE_TASK"
 GRADLE="$(./android/ensure-gradle.sh)"
 (cd "$ROOT/android" && "$GRADLE" --no-daemon "$GRADLE_TASK")

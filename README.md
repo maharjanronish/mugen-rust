@@ -98,41 +98,34 @@ docker run --rm -v "$PWD:/work" kurogane-android ./android/build.sh
 
 Output: `android/app/build/outputs/apk/debug/app-debug.apk`
 
-**CI**: every push to `main` runs the test suite and builds a debug APK —
-see the *Actions* tab → `android-apk` → artifact `kurogane-debug-apk`.
+**CI**: every push to `main` runs the test suite, a **real-content corpus
+check** (every SFF/AIR from the official Ikemen GO release must parse and
+fully decode), and builds a debug APK — see the *Actions* tab →
+`android-apk` → artifact `kurogane-debug-apk`.
 
-## Getting MUGEN content onto the device
+## Base data ships with the APK
 
-On first launch the app asks for storage access (classic permission dialog
-on Android 8/9, the *All files access* toggle on Android 10+) and then scans,
-in order:
+The APK bundles the official Ikemen GO base content (screenpack `data/`,
+`font/`, the KFM characters, `stages/`, `external/` scripts — the same set
+the official Android APK carries, ≈50 MB). On first launch the app asks for
+storage access, then **creates `/storage/emulated/0/Kurogane and installs
+the base data there automatically** — the folder you would otherwise have
+to make by hand appears ready to use.
 
-1. `/storage/emulated/0/Kurogane` — **recommended**; any file manager works
-2. `/storage/emulated/0/IkemenGO` — an existing Ikemen GO data folder is
-   auto-detected
-3. `Android/data/com.kurogane.engine/files/` — USB/ADB fallback
+After that it behaves like any MUGEN install: drop your own characters
+into `Kurogane/chars/<name>/` and stages into `Kurogane/stages/`, then tap
+**RESCAN**. Existing files are never overwritten, so your edits survive
+reinstalls. An existing `/storage/emulated/0/IkemenGO` folder is
+detected and used as-is instead.
 
-**Base data** — what the engine itself needs — is the `data/` and `font/`
-folders from an [Ikemen GO release zip](https://github.com/ikemen-engine/Ikemen-GO/releases)
-(or from a MUGEN 1.0/1.1 install). Drop them in so the folder looks like:
-
-```
-/storage/emulated/0/Kurogane/
-  data/    system.def, fight.def, select.def, common1.cns …  (screenpack)
-  font/    default fonts
-  chars/   your characters — one folder each, containing a .def
-  stages/  your stages (.def + .sff)
-```
-
-A screenpack (`data/system.def`) is the minimum for the scanner to accept a
-folder as content. The launcher reports what it found (character/stage/font
-counts, parsed SFF/AIR samples) on the HUD; the setup screen's **RESCAN**
-button re-checks after you add files.
+The bundle is pulled from the [Ikemen GO release zip](https://github.com/ikemen-engine/Ikemen-GO/releases)
+at build time (`./android/bundle-basedata.sh`; cached in CI), never committed
+to git.
 
 ## Host-side checks (CI)
 
 ```bash
-cargo test                # 34 tests: round-trips, quirks, Go-parity, controller
+cargo test                # 37 tests: round-trips, quirks, Go-parity, real-file fixtures
 cargo run --release -p krg-sfftool --bin krg-bench
 cargo run --release -p krg-sfftool -- path/to/char.sff --decode-all
 cargo run --release -p krg-sfftool -- path/to/char.air
@@ -143,6 +136,7 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 | Area | Status | Notes |
 |---|---|---|
 | Atoi / Atof / IsNumeric / SectionName | ✅ ported | incl. saturation (`IMax`/`IErr`) and the Atof signed-exponent bug |
+| SFF v2 header (64-byte: fsho@36, n@40, fpho@44, npal@48, lofs@52, tofs@60) | ✅ ported | verified byte-for-byte vs real FF3 files (fight/glyphs.sff) |
 | SFF v1 subheaders, linked sprites, ps flag | ✅ ported | first-wins duplicate keys, shareCopy semantics |
 | SFF v1 PCX header, RLE w/ bpl padding strip | ✅ ported | incl. `k==bpl → n=1` quirk |
 | SFF v1 palette scan (0x0C backward scan, char-first legacy path) | ✅ ported | incl. SetPxl silent-drop of length mismatches |

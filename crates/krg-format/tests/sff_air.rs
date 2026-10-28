@@ -117,19 +117,20 @@ pub fn build_sff_v2() -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     buf.extend_from_slice(b"ElecbyteSpr\0");
     buf.extend_from_slice(&[0, 0, 0, 2]); // verlo3..verhi → 2.0.0.0
-    buf.extend(std::iter::repeat(0u8).take(16)); // 4 dummy u32
+    // Five dummy u32s @16..35 (image.go:1577-1581 — the v2 header is 64 bytes).
+    buf.extend(std::iter::repeat(0u8).take(20));
     let first_sub: u32 = 2048;
-    buf.extend_from_slice(&first_sub.to_le_bytes()); // FirstSpriteHeaderOffset @32
-    buf.extend_from_slice(&1u32.to_le_bytes()); // NumberOfSprites @36
-    buf.extend_from_slice(&1024u32.to_le_bytes()); // FirstPaletteHeaderOffset @40
-    buf.extend_from_slice(&1u32.to_le_bytes()); // NumberOfPalettes @44
     // Layout by construction: subheader @2048 (28 B) → prefix @2076 →
     // RLE8 @2080..2088 → palette data (lofs) @2088.
     let data_ofs: u32 = first_sub + 28; // 4-byte length prefix position
     let lofs: u32 = data_ofs + 4 + rle8.len() as u32;
-    buf.extend_from_slice(&lofs.to_le_bytes()); // lofs @48
-    buf.extend_from_slice(&0u32.to_le_bytes()); // dummy @52
-    buf.extend_from_slice(&0u32.to_le_bytes()); // tofs @56 (0 → absolute offsets)
+    buf.extend_from_slice(&first_sub.to_le_bytes()); // FirstSpriteHeaderOffset @36
+    buf.extend_from_slice(&1u32.to_le_bytes()); // NumberOfSprites @40
+    buf.extend_from_slice(&1024u32.to_le_bytes()); // FirstPaletteHeaderOffset @44
+    buf.extend_from_slice(&1u32.to_le_bytes()); // NumberOfPalettes @48
+    buf.extend_from_slice(&lofs.to_le_bytes()); // lofs @52
+    buf.extend_from_slice(&0u32.to_le_bytes()); // dummy @56
+    buf.extend_from_slice(&0u32.to_le_bytes()); // tofs @60 (0 → absolute offsets)
 
     // Palette subheader at 1024 (16 bytes): gn0, gn1, gn2, link, ofs, plSize.
     buf.extend(std::iter::repeat(0u8).take(1024 - buf.len()));
@@ -140,9 +141,11 @@ pub fn build_sff_v2() -> Vec<u8> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // ofs (relative to lofs → 0)
     buf.extend_from_slice(&(256u32 * 4).to_le_bytes()); // plSize
 
-    // Sprite subheader at 2048 (28 bytes) — TRUE v2 layout:
-    // group@0, number@2, Size(w,h)@4/@6, axis@8/@10, link@12, format@14,
-    // coldepth@15, ofs@16, size@20, palidx@22, flags@24, rlelen@26.
+    // Sprite subheader at 2048 (28 bytes) — TRUE v2 layout
+    // (image.go:1159-1206): group u16 @0, number u16 @2, Size(w,h) i16
+    // @4/@6, axis Offset i16 @8/@10, link u16 @12, format u8 @14,
+    // coldepth u8 @15, ofs u32 @16, size u32 @20, palidx u16 @24,
+    // flags u16 @26 — bit0: 0 → ofs is lofs-relative, 1 → tofs-relative.
     buf.extend(std::iter::repeat(0u8).take(first_sub as usize - buf.len()));
     buf.extend_from_slice(&0u16.to_le_bytes()); // group
     buf.extend_from_slice(&0u16.to_le_bytes()); // number

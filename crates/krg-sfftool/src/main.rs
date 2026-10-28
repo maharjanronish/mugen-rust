@@ -88,6 +88,8 @@ fn main() {
                 println!("  pixel bytes per pass: {:.2} MiB", total_px as f64 / n as f64 / 1048576.0);
                 if failures > 0 {
                     println!("  failures: {failures}");
+                    // Corpus gate: any decode failure fails the run (CI).
+                    std::process::exit(3);
                 }
                 println!(
                     "  cache used: {:.2} MiB / budget {}",

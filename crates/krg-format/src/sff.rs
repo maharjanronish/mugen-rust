@@ -115,8 +115,19 @@ pub struct SffHeader {
 
 impl SffHeader {
     /// Port of `SffHeader.Read` (image.go:1527).
+    ///
+    /// Field offsets (verified byte-for-byte against real FF3/Elecbyte
+    /// files — fight.sff, glyphs.sff, default-3x5.sff):
+    ///
+    /// * v1: NumberOfSprites u32 @20, FirstSpriteHeaderOffset u32 @24,
+    ///   dummy u32 @28. (Header is 32 bytes + padding; subheaders are a
+    ///   linked list — each one's u32 @0 points at the next subheader.)
+    /// * v2: FIVE dummy u32s @16..35, then FirstSpriteHeaderOffset @36,
+    ///   NumberOfSprites @40, FirstPaletteHeaderOffset @44,
+    ///   NumberOfPalettes @48, lofs @52, dummy @56, tofs @60. (64-byte
+    ///   header; subheader table is a fixed-stride-28 array at fsho.)
     pub fn read(d: &[u8]) -> Result<SffHeader, SffError> {
-        if d.len() < 60 || &d[..12] != b"ElecbyteSpr\0" {
+        if d.len() < 12 || &d[..12] != b"ElecbyteSpr\0" {
             return Err(SffError::InvalidHeader);
         }
         let verhi = d[15];
@@ -135,12 +146,12 @@ impl SffHeader {
                 h.first_sprite_header_offset = rd_u32(d, 24)?;
             }
             2 => {
-                h.first_sprite_header_offset = rd_u32(d, 32)?;
-                h.number_of_sprites = rd_u32(d, 36)?;
-                h.first_palette_header_offset = rd_u32(d, 40)?;
-                h.number_of_palettes = rd_u32(d, 44)?;
-                h.lofs = rd_u32(d, 48)?;
-                h.tofs = rd_u32(d, 56)?;
+                h.first_sprite_header_offset = rd_u32(d, 36)?;
+                h.number_of_sprites = rd_u32(d, 40)?;
+                h.first_palette_header_offset = rd_u32(d, 44)?;
+                h.number_of_palettes = rd_u32(d, 48)?;
+                h.lofs = rd_u32(d, 52)?;
+                h.tofs = rd_u32(d, 60)?;
             }
             _ => return Err(SffError::UnrecognizedVersion),
         }

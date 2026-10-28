@@ -13,6 +13,46 @@ jobs:
       - name: Run unit + integration tests
         run: cargo test --workspace
 
+  # Real-world format conformance: every SFF/AIR shipped in the official
+  # Ikemen GO release must parse and fully decode through the Kurogane
+  # format layer. This is the gate that caught the v2-header-offset bug.
+  content-corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Ikemen GO release zip
+        uses: actions/cache@v4
+        with:
+          path: android/.cache/Ikemen_GO-v1.0.0-linux.zip
+          key: ikemen-go-linux-v1.0.0
+
+      - name: Bundle base data (provides the corpus)
+        run: ./android/bundle-basedata.sh
+
+      - name: Build krg-sfftool
+        run: cargo build --release -p krg-sfftool
+
+      - name: SFF conformance — parse + decode every sprite
+        run: |
+          set -e
+          n=0
+          while IFS= read -r -d '' f; do
+            ./target/release/krg-sfftool "$f" --decode-all > /dev/null
+            n=$((n+1))
+          done < <(find android/app/src/main/assets/basedata -name '*.sff' -print0)
+          echo "SFF corpus: $n files, all decoded clean"
+
+      - name: AIR conformance
+        run: |
+          set -e
+          n=0
+          while IFS= read -r -d '' f; do
+            ./target/release/krg-sfftool "$f" > /dev/null
+            n=$((n+1))
+          done < <(find android/app/src/main/assets/basedata -name '*.air' -print0)
+          echo "AIR corpus: $n files"
+
   debug-apk:
     runs-on: ubuntu-latest
     needs: host-tests
@@ -44,6 +84,15 @@ jobs:
         run: |
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
             -o android/app/src/main/jniLibs build --release -p krg-android
+
+      - name: Cache Ikemen GO release zip
+        uses: actions/cache@v4
+        with:
+          path: android/.cache/Ikemen_GO-v1.0.0-linux.zip
+          key: ikemen-go-linux-v1.0.0
+
+      - name: Bundle base data into APK assets
+        run: ./android/bundle-basedata.sh
 
       - uses: gradle/actions/setup-gradle@v3
         with:

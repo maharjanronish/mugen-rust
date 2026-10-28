@@ -1,3 +1,8 @@
+# Bundled Ikemen GO base data — pulled from the release zip at build time
+# by android/bundle-basedata.sh (never committed; ~50 MB).
+android/app/src/main/assets/
+android/.cache/
+
 /target
 Cargo.lock
 android/app/src/main/jniLibs/
