@@ -13,13 +13,23 @@
 //!   `krg-input` (single source of truth; the view only renders what Rust
 //!   computes). Layout editing (drag/pinch) arrives through the `edit_*`
 //!   entry points and persists to a text file the app passes in.
+//! * `GameSurfaceView.nativeGl*` — the GLES 3.0 renderer bridge. All GL calls
+//!   happen on the GLSurfaceView render thread (that context owns them); the
+//!   scene (kfm demo) streams its sprites through krg-gfx's LRU texture cache.
+//! * `MainActivity.nativeSceneSetRoot` — hands the resolved content root to
+//!   the GL thread; a generation counter makes it reload on rescan.
+
+mod scene;
 
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jfloat, jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use krg_gfx::Renderer;
 use krg_input::{TouchController, TouchPhase, ZoneKind};
 
 static CONTROLLER: Mutex<Option<TouchController>> = Mutex::new(None);
@@ -27,6 +37,156 @@ static CONTROLLER: Mutex<Option<TouchController>> = Mutex::new(None);
 fn with_controller<R>(f: impl FnOnce(&mut TouchController) -> R) -> R {
     let mut guard = CONTROLLER.lock().unwrap();
     f(guard.get_or_insert_with(TouchController::new))
+}
+
+// ── GLES renderer (GameSurfaceView — GL thread only) ────────────────────────
+
+/// GL-thread state: the renderer plus the demo scene. thread_local keeps the
+/// glow context (not Send) off the statics and documents the thread contract.
+struct Gls {
+    renderer: Renderer,
+    scene: Option<scene::Scene>,
+    scene_gen: u64,
+}
+
+thread_local! {
+    static GLS: RefCell<Option<Gls>> = const { RefCell::new(None) };
+}
+
+/// Content root for the scene (set from the scan thread, read on the GL
+/// thread). `SCENE_GEN` bumps on every change → the GL thread reloads.
+static SCENE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+static SCENE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// EGL entry-point resolver for glow (Android only; never called on host).
+#[cfg(target_os = "android")]
+mod egl {
+    /// libEGL is a system library on Android — the linker resolves this at
+    /// load; no runtime lookup needed.
+    #[link(name = "EGL")]
+    extern "C" {
+        fn eglGetProcAddress(name: *const std::os::raw::c_char)
+            -> *const std::os::raw::c_void;
+    }
+
+    pub fn get_proc(name: &str) -> *const std::os::raw::c_void {
+        match std::ffi::CString::new(name) {
+            Ok(c) => unsafe { eglGetProcAddress(c.as_ptr()) },
+            Err(_) => std::ptr::null(),
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+mod egl {
+    pub fn get_proc(_name: &str) -> *const std::os::raw::c_void {
+        std::ptr::null()
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_GameSurfaceView_nativeGlInit(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
+    );
+    GLS.with(|g| {
+        let mut slot = g.borrow_mut();
+        if let Some(mut old) = slot.take() {
+            old.renderer.destroy(); // context recreation: names are stale anyway
+        }
+        match unsafe { Renderer::new(egl::get_proc) } {
+            Ok(renderer) => {
+                log::info!("krg-gfx renderer online (GLES 3.0, batched quads + LRU textures)");
+                *slot = Some(Gls {
+                    renderer,
+                    scene: None,
+                    scene_gen: 0,
+                });
+            }
+            Err(e) => log::error!("renderer init failed: {e}"),
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_GameSurfaceView_nativeGlResize(
+    _env: JNIEnv,
+    _class: JClass,
+    w: jint,
+    h: jint,
+) {
+    GLS.with(|g| {
+        if let Some(gls) = g.borrow_mut().as_mut() {
+            gls.renderer.resize(w, h);
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_GameSurfaceView_nativeGlDraw(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    GLS.with(|g| {
+        let mut slot = g.borrow_mut();
+        let Some(gls) = slot.as_mut() else {
+            return;
+        };
+        // Root changed since the scene was loaded → reload it.
+        let gen = SCENE_GEN.load(Ordering::Relaxed);
+        if gls.scene_gen != gen {
+            gls.scene_gen = gen;
+            gls.scene = None;
+        }
+        if gls.scene.is_none() {
+            let root = SCENE_ROOT.lock().unwrap().clone();
+            if let Some(root) = root {
+                gls.scene = scene::Scene::load(&root);
+            }
+        }
+        if let Some(scene) = gls.scene.as_mut() {
+            gls.renderer.begin_scene();
+            scene.advance_and_draw(&mut gls.renderer);
+            gls.renderer.present();
+            let s = gls.renderer.stats();
+            if s.frames % 300 == 0 {
+                log::info!(
+                    "gfx: frame {} — {} quads, {} runs, {} textures ({} KB), {} evictions",
+                    s.frames,
+                    s.quads,
+                    s.runs,
+                    s.textures,
+                    s.tex_bytes / 1024,
+                    s.evictions
+                );
+            }
+        } else {
+            gls.renderer.clear_default();
+        }
+    });
+}
+
+/// Hand the resolved content root to the GL thread (called from the scan
+/// thread; the generation bump makes the next draw reload the scene).
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_MainActivity_nativeSceneSetRoot(
+    mut env: JNIEnv,
+    _class: JClass,
+    j_path: JString,
+) {
+    let path: String = env
+        .get_string(&j_path)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    if path.is_empty() {
+        return;
+    }
+    *SCENE_ROOT.lock().unwrap() = Some(PathBuf::from(&path));
+    SCENE_GEN.fetch_add(1, Ordering::Relaxed);
+    log::info!("scene root set: {path}");
 }
 
 // ── Content scan (MainActivity) ─────────────────────────────────────────────

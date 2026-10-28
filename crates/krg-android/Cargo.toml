@@ -11,7 +11,9 @@ name = "kurogane"
 crate-type = ["cdylib"]
 
 [dependencies]
+krg-core = { path = "../krg-core" }
 krg-format = { path = "../krg-format" }
+krg-gfx = { path = "../krg-gfx" }
 krg-input = { path = "../krg-input" }
 jni = "0.21"
 android_logger = { version = "0.15", default-features = false }

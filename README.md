@@ -83,6 +83,31 @@ an LRU byte budget.
 | Decode cost | — | 0.02 ms/sprite |
 | Hot fight sweep (300 sprites/frame) | — | 0.24 ms, 3.1 MiB resident under a 16 MiB budget |
 
+## Renderer — GLES 3.0, budgeted everywhere
+
+The renderer (crate **krg-gfx**, live in v0.7.0) is designed around three
+hard budgets instead of "as fast as possible, sort it out later":
+
+* **Fill rate**: the game renders at native MUGEN resolution (320×240) into
+  an FBO and reaches the screen as **one** letterboxed upscale quad — the
+  phone GPU's per-frame work at panel resolution is a single textured blit.
+* **CPU**: one shader, one pre-allocated vertex ring (packed 20-byte
+  vertices: 2×f32 pos, 2×f32 uv, 4×u8 color; 8192 quads ≈ 1 MB, reused every
+  frame — zero per-frame allocations), one `glDrawArrays` per texture/blend
+  **run**. Rotation is CPU-side per rotated quad only; the shader is a
+  single matrix multiply.
+* **RAM/VRAM**: two stacked LRUs — sprites decode on demand through the
+  format layer's `SpriteCache` (CPU, byte-budgeted) and live on the GPU as
+  texture objects under their own 48 MB budget with last-use eviction. A
+  full MUGEN roster never needs to fit; the working set does.
+
+Pixels are **premultiplied RGBA** end-to-end (decode → upload → blend), so
+alpha and additive blending are each one `glBlendFunc` switch and bilinear
+sprite edges have no dark halo. The demo scene (bundled kfm playing its AIR
+action 0) exercises the whole stack: SFF mmap → RLE/LZ5 decode → LRU texture
+stream → batched quads → FBO → upscale, driven by the GLSurfaceView vsync
+thread; the touch controller composites on top as a transparent overlay.
+
 ## Workspace layout
 
 ```
@@ -91,11 +116,14 @@ crates/
                  common.go; every quirk preserved, incl. the Atof exponent bug)
   krg-format/    SFF v1/v2 + PCX + RLE8/RLE5/LZ5 + AIR compiler
                  (port of image.go & anim.go), lazy Sff + SpriteCache LRU
+  krg-gfx/       GLES 3.0 renderer: batched 20-byte-vertex sprite quads,
+                 LRU texture streaming, 320×240 scene FBO + single upscale
   krg-input/     touch controller: 6 buttons + 8-way pad + START with chord
                  synthesis and a drag/pinch-editable persistent layout;
                  Ikemen InputBits-compatible
   krg-sfftool/   CLI: inspect/verify/benchmark content (host-only CI tool)
   krg-android/   JNI entry point (libkurogane.so): content scan + controller
+                 + GL renderer bridge (GameSurfaceView, EGL-loaded glow)
 android/         Docker image, build script, Gradle APK project
 ```
 
@@ -162,6 +190,7 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 | PNG sprites (10/11/12) + RGBA premultiply | ✅ ported | `SetRaw`'s `*0x101*a/0xff>>8` arithmetic |
 | AIR frames/trans/clsn/copy-action/inherit | ✅ ported | incl. duplicate-first-wins & purge rules |
 | InputBits (14 signals) + minimal controller | ✅ ported | bit-exact vs input.go:358; chords cover all signals |
+| GLES 3.0 batched sprite renderer + LRU texture streaming | ✅ ported | krg-gfx: 20-byte vertices, run batching, FBO 320×240 + single upscale |
 | isActPal (0,0) palette reset | ✅ ported | load flag |
 | preloadSff / ACT palette preselect | ⏳ next | engine-layer milestone |
 | CNS/CMD bytecode, stages, sound, netplay | ⏳ roadmap | the big ones |
@@ -170,7 +199,7 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 
 1. ~~Format layer~~ ✅
 2. ~~Minimal touch controller + APK pipeline~~ ✅
-3. GLES 3.0 renderer + GameActivity (texture upload from `Pixels`)
+3. GLES 3.0 renderer — core live (batching/LRU/FBO); next: stage camera, palette textures, GameActivity migration
 4. DEF/INI config + font rendering (fnt/sff fonts)
 5. CNS/CMD compiler + bytecode VM (the 48K-line core)
 6. Stage engine, audio (AAudio/Oboe), input → engine wiring

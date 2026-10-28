@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
 import android.view.View;
+import android.widget.FrameLayout;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -47,14 +48,26 @@ public class MainActivity extends Activity implements ControllerView.Host {
     private static final String[] BASE_MARKERS = {
             "data/fight.def", "data/system.base.def", "data/select.def"};
 
+    private GameSurfaceView game;
     private ControllerView view;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         hideSystemBars();
+        // GL game surface at the bottom, touch-controller overlay on top:
+        // SurfaceView content composites below regular views in the same
+        // window, and the overlay's play-mode canvas is transparent.
+        game = new GameSurfaceView(this);
         view = new ControllerView(this, this);
-        setContentView(view);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(game, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        root.addView(view, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
     }
 
     @Override
@@ -140,6 +153,13 @@ public class MainActivity extends Activity implements ControllerView.Host {
             String report = nativeScan(buildRoots());
             if (!report.startsWith("OK") && hasStorageAccess()) {
                 report = installBaseDataIfNeeded(report);
+            }
+            if (report.startsWith("OK: ")) {
+                // First line is "OK: <root>" — hand it to the GL renderer.
+                String root = report.split("\n", 2)[0].substring(4).trim();
+                if (!root.isEmpty()) {
+                    nativeSceneSetRoot(root);
+                }
             }
             final String r = report;
             view.post(() -> view.applyScan(r, hasStorageAccess()));
@@ -246,4 +266,6 @@ public class MainActivity extends Activity implements ControllerView.Host {
     }
 
     private native String nativeScan(String roots);
+
+    private native void nativeSceneSetRoot(String path);
 }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/krg-core",
     "crates/krg-format",
+    "crates/krg-gfx",
     "crates/krg-input",
     "crates/krg-sfftool",
     "crates/krg-android",

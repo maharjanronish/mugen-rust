@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Environment;
@@ -425,10 +426,17 @@ public final class ControllerView extends View {
 
     @Override
     protected void onDraw(Canvas c) {
-        c.drawColor(BG);
         if (setupMode) {
+            c.drawColor(BG);
             drawSetup(c, getWidth(), getHeight());
             return;
+        }
+        // Play mode: transparent so the GLES game surface shows through
+        // (this view composites above it in the same window).
+        c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+        if (editMode) {
+            // Readable backdrop over the game while editing.
+            c.drawColor(0x8C0E0E12);
         }
         float w = getWidth();
         float h = getHeight();
@@ -512,7 +520,8 @@ public final class ControllerView extends View {
         c.drawText("X+Y=Z   A+B=C   A+X=D   B+Y=W   ALL=M", pad, pad + 56f, hud);
         hud.setTextSize(19f);
         hud.setColor(0xFF8A8A93);
-        c.drawText("hold START (or tap EDIT) to customize", pad, pad + 86f, hud);
+        c.drawText("tap EDIT to customize · hold 2 buttons for extra signals",
+                pad, pad + 86f, hud);
 
         hud.setTextSize(19f);
         hud.setColor(0xFF8A8A93);

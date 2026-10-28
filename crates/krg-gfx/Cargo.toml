@@ -1,0 +1,14 @@
+[package]
+name = "krg-gfx"
+description = "Kurogane GLES 3.0 renderer: batched sprite quads, LRU texture streaming, FBO upscale"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glow = { version = "0.16", default-features = false }
+krg-format = { path = "../krg-format" }
+log = "0.4"
+
+[dev-dependencies]
