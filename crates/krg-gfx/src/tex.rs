@@ -14,9 +14,14 @@ use crate::lru::FrameLru;
 use crate::GfxError;
 use krg_format::Pixels;
 
-/// Identity of a sprite texture inside one SFF.
+/// Identity of a sprite texture: **which source SFF** plus (group, number).
+/// The src slot namespaces the one LRU the renderer owns — stage, char and
+/// font sprite (0,0) never collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TexKey {
+    /// Source SFF slot, assigned by the scene (0 = stage, 1 = chars, 2 = font
+    /// in the v0.8 demo; the numbers only need to be unique per frame).
+    pub src: u32,
     pub group: u16,
     pub number: u16,
 }

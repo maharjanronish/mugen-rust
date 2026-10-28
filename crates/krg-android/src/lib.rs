@@ -39,6 +39,13 @@ fn with_controller<R>(f: impl FnOnce(&mut TouchController) -> R) -> R {
     f(guard.get_or_insert_with(TouchController::new))
 }
 
+/// Currently held InputBits, read by the scene for edge detection.
+/// Called on the GL thread once per frame — the mutex is uncontended in
+/// practice (touch events are rare compared to frames).
+pub(crate) fn controller_held() -> u32 {
+    with_controller(|c| c.held())
+}
+
 // ── GLES renderer (GameSurfaceView — GL thread only) ────────────────────────
 
 /// GL-thread state: the renderer plus the demo scene. thread_local keeps the

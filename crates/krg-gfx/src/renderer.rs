@@ -257,6 +257,8 @@ impl Renderer {
 
     /// Resolve (streaming on miss) and draw one sprite.
     ///
+    /// `src` namespaces the texture LRU: several SFFs (stage / chars / font)
+    /// can share one renderer without their (group, number) colliding.
     /// `(x, y)` is the sprite's **axis position** in game space — the AIR
     /// `xoffset/yoffset` of the entry are subtracted like Ikemen's draw at
     /// `(pos - offset)` with `xs`/`ys` scale factors (negative flips).
@@ -266,6 +268,7 @@ impl Renderer {
     pub fn push_sprite(
         &mut self,
         cache: &mut SpriteCache,
+        src: u32,
         group: u16,
         number: u16,
         x: f32,
@@ -287,7 +290,7 @@ impl Renderer {
         if w == 0.0 || h == 0.0 {
             return false;
         }
-        let key = TexKey { group, number };
+        let key = TexKey { src, group, number };
         let info = match self.texlru.get(key) {
             Some(info) => info,
             None => {
@@ -386,20 +389,7 @@ impl Renderer {
             );
             gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             let (dx, dy, dw, dh) = letterbox(sw, sh, GAME_W, GAME_H);
-            let q = Quad {
-                x: dx,
-                y: dy,
-                w: dw,
-                h: dh,
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                color: [255, 255, 255, 255],
-                angle: 0.0,
-                px: dx + dw / 2.0,
-                py: dy + dh / 2.0,
-            };
+            let q = scene_blit_quad(dx, dy, dw, dh);
             // Scene texture is sampled with its own (linear) filter.
             if let Some(t) = nz(self.scene_tex) {
                 gl.bind_texture(glow::TEXTURE_2D, Some(t));
@@ -458,6 +448,31 @@ fn ortho(w: f32, h: f32) -> [f32; 16] {
     ]
 }
 
+/// The letterbox blit quad for `present()`.
+///
+/// **v is deliberately flipped.** The scene is rendered into the FBO with a
+/// y-down game-space ortho, so game-space top (y≈0) lands at window row
+/// `GAME_H-1` — texture v≈1 — and game-space bottom at v≈0. The present
+/// quad's top-left dst corner receives uv `(u0, v0)`, so v0 must be 1.0 to
+/// put game-top on screen-top. Without the flip every frame renders upside
+/// down (the v0.7 bug).
+fn scene_blit_quad(dx: f32, dy: f32, dw: f32, dh: f32) -> Quad {
+    Quad {
+        x: dx,
+        y: dy,
+        w: dw,
+        h: dh,
+        u0: 0.0,
+        v0: 1.0,
+        u1: 1.0,
+        v1: 0.0,
+        color: [255, 255, 255, 255],
+        angle: 0.0,
+        px: dx + dw / 2.0,
+        py: dy + dh / 2.0,
+    }
+}
+
 /// Largest `gw:gh`-aspect rect that fits into `sw:sh`, centered.
 pub fn letterbox(sw: i32, sh: i32, gw: i32, gh: i32) -> (f32, f32, f32, f32) {
     let (sw, sh, gw, gh) = (sw as f32, sh as f32, gw as f32, gh as f32);
@@ -508,6 +523,16 @@ mod tests {
         let br = (m[0] * 320.0 + m[4] * 240.0 + m[12], m[1] * 320.0 + m[5] * 240.0 + m[13]);
         assert!((tl.0 - (-1.0)).abs() < 1e-6 && (tl.1 - 1.0).abs() < 1e-6);
         assert!((br.0 - 1.0).abs() < 1e-6 && (br.1 - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scene_blit_flips_v_so_game_top_stays_on_screen_top() {
+        let q = scene_blit_quad(480.0, 0.0, 1440.0, 1080.0);
+        // dst top-left gets v0 — it must sample the FBO's v=1 row (game top).
+        assert_eq!((q.v0, q.v1), (1.0, 0.0));
+        // u is untouched (GL x is left-to-right both passes).
+        assert_eq!((q.u0, q.u1), (0.0, 1.0));
+        assert_eq!((q.x, q.y, q.w, q.h), (480.0, 0.0, 1440.0, 1080.0));
     }
 
     #[test]

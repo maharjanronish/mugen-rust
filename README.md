@@ -103,10 +103,13 @@ hard budgets instead of "as fast as possible, sort it out later":
 
 Pixels are **premultiplied RGBA** end-to-end (decode → upload → blend), so
 alpha and additive blending are each one `glBlendFunc` switch and bilinear
-sprite edges have no dark halo. The demo scene (bundled kfm playing its AIR
-action 0) exercises the whole stack: SFF mmap → RLE/LZ5 decode → LRU texture
-stream → batched quads → FBO → upscale, driven by the GLSurfaceView vsync
-thread; the touch controller composites on top as a transparent overlay.
+sprite edges have no dark halo. The v0.8 scene looks like a fighting game:
+a **title menu** (bundled bitmap FNT v2 font, dpad+A navigation) over the
+dimmed stage, then the **fight demo** — the stage's `[BG]` layers (normal
++ parallax + tiling, per-element `trans`), both kfm fighters at the stage's
+start positions facing each other, and the foreground layer on top. The
+one renderer LRU is namespaced per source SFF (stage / char / font), so
+all three stream through the same budget without collisions.
 
 ## Workspace layout
 
@@ -114,8 +117,9 @@ thread; the touch controller composites on top as a transparent overlay.
 crates/
   krg-core/      lenient MUGEN text parsers (Atoi/Atof/SectionName — port of
                  common.go; every quirk preserved, incl. the Atof exponent bug)
-  krg-format/    SFF v1/v2 + PCX + RLE8/RLE5/LZ5 + AIR compiler
-                 (port of image.go & anim.go), lazy Sff + SpriteCache LRU
+  krg-format/    SFF v1/v2 + PCX + RLE8/RLE5/LZ5 + AIR compiler + stage DEF
+                 parser + bitmap FNT v2 fonts (ports of image.go, anim.go,
+                 stage.go, font.go), lazy Sff + SpriteCache LRU
   krg-gfx/       GLES 3.0 renderer: batched 20-byte-vertex sprite quads,
                  LRU texture streaming, 320×240 scene FBO + single upscale
   krg-input/     touch controller: 6 buttons + 8-way pad + START with chord
@@ -123,7 +127,7 @@ crates/
                  Ikemen InputBits-compatible
   krg-sfftool/   CLI: inspect/verify/benchmark content (host-only CI tool)
   krg-android/   JNI entry point (libkurogane.so): content scan + controller
-                 + GL renderer bridge (GameSurfaceView, EGL-loaded glow)
+                 + GL renderer bridge + the scene (menu → stage + fighters)
 android/         Docker image, build script, Gradle APK project
 ```
 
@@ -199,10 +203,13 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 
 1. ~~Format layer~~ ✅
 2. ~~Minimal touch controller + APK pipeline~~ ✅
-3. GLES 3.0 renderer — core live (batching/LRU/FBO); next: stage camera, palette textures, GameActivity migration
-4. DEF/INI config + font rendering (fnt/sff fonts)
+3. ~~GLES 3.0 renderer core~~ ✅ (batching/LRU/FBO/flip) — next: fight
+   camera (boundleft/right, zoom), true parallax trapezoids, GameActivity
+4. ~~DEF/INI stage + font rendering~~ ✅ (stage DEF, bitmap FNT v2) —
+   next: motif `system.def` menus, TTF fonts
 5. CNS/CMD compiler + bytecode VM (the 48K-line core)
-6. Stage engine, audio (AAudio/Oboe), input → engine wiring
+6. Stage engine completion (bgctrl/velocity/animated BGs), audio
+   (AAudio/Oboe), input → engine wiring
 7. Rollback netcode (strict-IEEE, frame-hash parity harness)
 8. Lua scripting bridge (LuaJIT on arm64)
 
