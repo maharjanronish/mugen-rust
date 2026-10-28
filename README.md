@@ -10,29 +10,29 @@ be audited line-by-line against the Go source.
 
 ---
 
-## Controls — minimal buttons, every move
+## Controls — six buttons, fully customizable
 
 MUGEN content can require up to **14 input signals** (6 attack buttons, 4
-directions, start, plus Ikemen's extra `d`/`w`/`m` buttons). Six on-screen
-attack buttons is clutter — Kurogane ships **four** and synthesizes the rest
-as simultaneous-press **chords**. Both signals are emitted at once, so
-`QCF+Z`-style *and* `X+Y`-style commands all fire:
+directions, start, plus Ikemen's extra `d`/`w`/`m` buttons). Kurogane ships
+the classic **six-button layout** (punch row **X Y Z**, kick row **A B C**) and
+still synthesizes the Ikemen extras as simultaneous-press **chords**. Both
+signals are emitted at once, so `QCF+Z`-style *and* `X+Y`-style commands all
+fire:
 
 ```
         ┌──────────────────────────────────────────────┐
-        │  [≡] start                          HUD      │
+        │  [≡] start  [EDIT]                  HUD      │
         │                                              │
-        │   ╭───╮                        Y   ○        │
-        │   │ ● │  8-way pad        X  ○      ○  B    │
-        │   ╰───╯                        A  ○         │
+        │   ╭───╮                      X ○  Y ○  Z ○   │
+        │   │ ● │  8-way pad            A ○  B ○  C ○  │
+        │   ╰───╯                                      │
         └──────────────────────────────────────────────┘
 ```
 
 | Physical | Emits |
 |---|---|
-| **X** light punch · **Y** heavy punch · **A** light kick · **B** heavy kick | X / Y / A / B |
-| X+Y together | + **Z** (heavy punch) |
-| A+B together | + **C** (heavy kick) |
+| **X/Y/Z** punches · **A/B/C** kicks | the six attack signals directly |
+| X+Y together | + **Z** · A+B together | + **C** (chords still work) |
 | A+X together | + **D** · B+Y together | + **W** (Ikemen extras) |
 | A+B+X+Y (all four) | + **M** |
 | START | **S** |
@@ -41,6 +41,23 @@ as simultaneous-press **chords**. Both signals are emitted at once, so
 Quarter-circles, hold-back blocking, jumps and **double-tap dashes (`F,F`)**
 all work natively — MUGEN command syntax reads them from the raw direction
 stream, so no hidden controller magic is needed or wanted.
+
+### Editing the layout
+
+Tap the small **EDIT** button (beside START), or **hold START** (~0.5 s) to
+open the editor — START is the one control no gameplay ever holds, so the
+editor can never trigger mid-fight:
+
+* **drag** any control to move it (centers are stored normalized — the layout
+  survives rotation and device changes)
+* **pinch** with two fingers, or the **−/+** steppers, to resize
+* **DEFAULTS** restores the factory layout, **CANCEL** undoes the whole
+  session, **SAVE** persists
+* the layout is stored in `files/controller.ini` (tolerant line format;
+  missing/corrupt entries fall back to defaults)
+
+Entering the editor releases all held buttons, so the hold can never
+leave a button stuck down mid-fight.
 
 Bit layout is **bit-exact with Ikemen GO's `InputBits`** (`src/input.go:358`):
 `PU=1<<0 … PR=1<<3, A..Z=1<<4..1<<9, S=1<<10, D/W/M=1<<11..13`.
@@ -76,8 +93,9 @@ crates/
                  common.go; every quirk preserved, incl. the Atof exponent bug)
   krg-format/    SFF v1/v2 + PCX + RLE8/RLE5/LZ5 + AIR compiler
                  (port of image.go & anim.go), lazy Sff + SpriteCache LRU
-  krg-input/     minimal touch controller: 4 buttons + 8-way pad + START with
-                 chord synthesis; Ikemen InputBits-compatible
+  krg-input/     touch controller: 6 buttons + 8-way pad + START with chord
+                 synthesis and a drag/pinch-editable persistent layout;
+                 Ikemen InputBits-compatible
   krg-sfftool/   CLI: inspect/verify/benchmark content (host-only CI tool)
   krg-android/   JNI entry point (libkurogane.so): content scan + controller
 android/         Docker image, build script, Gradle APK project

@@ -8,18 +8,19 @@
 //!   first root that contains a MUGEN screenpack, scans it through the real
 //!   Kurogane format layer and returns a report whose first line is `OK:`
 //!   or `NO CONTENT`.
-//! * `ControllerView.nativeInput*` — the minimal touch controller bridge:
-//!   touches are forwarded from the Java view, all zone geometry and chord
-//!   logic live in `krg-input` (single source of truth; the view only
-//!   renders what Rust computes).
+//! * `ControllerView.nativeInput*` — the touch controller bridge: touches are
+//!   forwarded from the Java view, all zone geometry and chord logic live in
+//!   `krg-input` (single source of truth; the view only renders what Rust
+//!   computes). Layout editing (drag/pinch) arrives through the `edit_*`
+//!   entry points and persists to a text file the app passes in.
 
 use jni::objects::{JClass, JString};
-use jni::sys::{jfloat, jfloatArray, jint, jlong, jstring};
+use jni::sys::{jboolean, jfloat, jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use krg_input::{TouchController, TouchPhase};
+use krg_input::{TouchController, TouchPhase, ZoneKind};
 
 static CONTROLLER: Mutex<Option<TouchController>> = Mutex::new(None);
 
@@ -169,7 +170,9 @@ fn scan_report(roots: &str) -> String {
     let chars = count_char_dirs(&root.join("chars"));
     let stages = count_def_files(&root.join("stages"));
     let fonts = count_def_files(&root.join("font"));
-    r.push_str(&format!("chars: {chars} | stages: {stages} | fonts: {fonts}\n"));
+    r.push_str(&format!(
+        "chars: {chars} | stages: {stages} | fonts: {fonts}\n"
+    ));
     parse_samples(&root.join("data"), &mut r, 3, 3);
     if let Some(cd) = first_char_dir(&root.join("chars")) {
         parse_samples(&cd, &mut r, 1, 1);
@@ -231,8 +234,9 @@ pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputHeld(
     with_controller(|c| c.held()) as jint
 }
 
-/// Flat zone array, stride 8: [type, param, cx, cy, r, held, ex, ey] × 6.
-/// type: 0 = pad, 1 = button, 2 = start. Pixel coordinates for a w×h view.
+/// Flat zone array, stride 8: [type, param, cx, cy, r, held, ex, ey] — 8
+/// zones (pad + 6 buttons + START). type: 0 = pad, 1 = button, 2 = start.
+/// Pixel coordinates for a w×h view.
 #[no_mangle]
 pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputZones(
     env: JNIEnv,
@@ -273,4 +277,107 @@ pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputDescri
     env.new_string(s)
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+// ── Layout editing + persistence (ControllerView) ──────────────────────────
+
+/// Wire identity resolver: (kind, param) → (ZoneKind, bit). `kind`/`param`
+/// mirror the zone array the view already parses (kind: 0/1/2, param:
+/// A=0..Z=5 for buttons). Returns None for garbage.
+fn zone_id(kind: jint, param: jint) -> Option<(ZoneKind, u32)> {
+    ZoneKind::from_wire(kind as i32, param as i32)
+}
+
+/// Drop every held signal + pointer (entering the layout editor, or focus
+/// loss — never leave a button stuck down).
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputReleaseAll() {
+    with_controller(|c| c.release_all());
+}
+
+/// Begin an edit session: snapshot the layout (for CANCEL) and clear holds.
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputEditBegin() {
+    with_controller(|c| c.edit_begin());
+}
+
+/// Move the control identified by (kind, param) so its center sits at
+/// pixel (x, y) of a w×h view (the view may add its grab offset first).
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputEditMove(
+    _env: JNIEnv,
+    _class: JClass,
+    kind: jint,
+    param: jint,
+    x: jfloat,
+    y: jfloat,
+    w: jfloat,
+    h: jfloat,
+) {
+    if let Some((k, bit)) = zone_id(kind, param) {
+        with_controller(|c| c.edit_move(k, bit, x, y, w, h));
+    }
+}
+
+/// Scale the control identified by (kind, param) by `factor` (clamped in
+/// Rust). Used by the pinch gesture and the −/+ toolbar steppers.
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputEditScale(
+    _env: JNIEnv,
+    _class: JClass,
+    kind: jint,
+    param: jint,
+    factor: jfloat,
+) {
+    if let Some((k, bit)) = zone_id(kind, param) {
+        with_controller(|c| c.edit_scale(k, bit, factor));
+    }
+}
+
+/// Abandon the edit session: restore the snapshot taken by EditBegin.
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputEditRevert() {
+    with_controller(|c| c.edit_revert());
+}
+
+/// Reset the live layout to factory defaults (stays in the edit session,
+/// so CANCEL still restores the pre-edit state).
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputResetLayout() {
+    with_controller(|c| c.reset_layout());
+}
+
+/// Persist the live layout to `path` (UTF-8 text). True on success.
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputLayoutSave(
+    mut env: JNIEnv,
+    _class: JClass,
+    j_path: JString,
+) -> jboolean {
+    let path: String = env
+        .get_string(&j_path)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    if path.is_empty() {
+        return 0;
+    }
+    with_controller(|c| c.save_layout(&PathBuf::from(&path))) as jboolean
+}
+
+/// Load a persisted layout from `path`. Missing/corrupt files keep the
+/// current (default) layout. True when parsed. Called once at startup.
+#[no_mangle]
+pub extern "system" fn Java_com_kurogane_engine_ControllerView_nativeInputLayoutLoad(
+    mut env: JNIEnv,
+    _class: JClass,
+    j_path: JString,
+) -> jboolean {
+    let path: String = env
+        .get_string(&j_path)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    if path.is_empty() {
+        return 0;
+    }
+    with_controller(|c| c.load_layout(Path::new(&path))) as jboolean
 }
