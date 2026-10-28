@@ -2032,3 +2032,112 @@ impl CharState {
 // safety: mark Send+Sync for GlobalInfo (all plain data)
 unsafe impl Send for GlobalInfo {}
 unsafe impl Sync for GlobalInfo {}
+
+// ── android scene bridge ──────────────────────────────────────────────────────
+
+/// One character's renderable state (drawn by krg-android from the scene).
+#[derive(Debug, Clone, Default)]
+pub struct CharDraw {
+    pub pos: [f32; 3],
+    pub facing: i32,
+    pub anim_no: i32,
+    /// current AIR element index (0-based)
+    pub frame_idx: i32,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub xscale: f32,
+    pub yscale: f32,
+    pub life: i32,
+    pub life_max: i32,
+    pub power: i32,
+    pub power_max: i32,
+    pub state_no: i32,
+    pub state_type: StateTypeT,
+    pub move_type: MoveTypeT,
+    pub alive: bool,
+}
+
+/// Per-frame render state for the fight scene.
+#[derive(Debug, Clone, Default)]
+pub struct FightSnapshot {
+    pub chars: Vec<CharDraw>,
+    pub round_state: i32,
+    pub round_no: i32,
+    pub time_left: i32,
+}
+
+impl Fight {
+    /// Step one 60Hz tick with raw InputBits (krg-input::bits layout) —
+    /// the android touch controller feeds these directly.
+    pub fn step_bits(&mut self, p1: u32, p2: u32) {
+        let bits_to_arr = |b: u32| -> [bool; 14] {
+            [
+                b & crate::cmd::PU_BIT != 0,
+                b & crate::cmd::PD_BIT != 0,
+                b & crate::cmd::PL_BIT != 0,
+                b & crate::cmd::PR_BIT != 0,
+                b & crate::cmd::ABIT != 0,
+                b & crate::cmd::BBIT != 0,
+                b & crate::cmd::CBIT != 0,
+                b & crate::cmd::XBIT != 0,
+                b & crate::cmd::YBIT != 0,
+                b & crate::cmd::ZBIT != 0,
+                b & crate::cmd::SBIT != 0,
+                b & crate::cmd::DBIT != 0,
+                b & crate::cmd::WBIT != 0,
+                b & crate::cmd::MBIT != 0,
+            ]
+        };
+        self.step(&[bits_to_arr(p1), bits_to_arr(p2)]);
+    }
+
+    /// Render snapshot (cheap; clones only the draw-relevant fields).
+    pub fn snapshot(&self) -> FightSnapshot {
+        let chars = self
+            .chars
+            .iter()
+            .map(|c| {
+                let frame_idx = {
+                    let anim = c.gi.anims.anims.get(&c.anim.anim_no);
+                    match anim {
+                        Some(a) if !a.frames.is_empty() => {
+                            (c.anim.curelem.max(0) as usize).min(a.frames.len() - 1) as i32
+                        }
+                        _ => 0,
+                    }
+                };
+                let (flip_h, flip_v, xs, ys) = {
+                    let anim = c.gi.anims.anims.get(&c.anim.anim_no);
+                    match anim.and_then(|a| a.frames.get(frame_idx.max(0) as usize)) {
+                        Some(f) => (f.hscale < 0, f.vscale < 0, f.xscale, f.yscale),
+                        None => (false, false, 1.0, 1.0),
+                    }
+                };
+                CharDraw {
+                    pos: c.pos,
+                    facing: c.facing,
+                    anim_no: c.anim.anim_no,
+                    frame_idx,
+                    flip_h,
+                    flip_v,
+                    xscale: c.gi.size.xscale,
+                    yscale: c.gi.size.yscale,
+                    life: c.life,
+                    life_max: c.life_max,
+                    power: c.power,
+                    power_max: c.power_max,
+                    state_no: c.state_no,
+                    state_type: c.state_type,
+                    move_type: c.move_type,
+                    alive: c.alive,
+                }
+            })
+            .collect();
+        FightSnapshot {
+            chars,
+            round_state: self.round_state,
+            round_no: self.round_no,
+            time_left: self.cur_round_time / 60,
+        }
+    }
+}

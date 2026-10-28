@@ -1930,3 +1930,20 @@ time = 30
     }
 }
 
+
+// InputBits re-exports for the runtime bridge (bit layout identical to
+// krg-input::bits — input.go:358).
+pub const PU_BIT: u32 = 1 << 0;
+pub const PD_BIT: u32 = 1 << 1;
+pub const PL_BIT: u32 = 1 << 2;
+pub const PR_BIT: u32 = 1 << 3;
+pub const ABIT: u32 = 1 << 4;
+pub const BBIT: u32 = 1 << 5;
+pub const CBIT: u32 = 1 << 6;
+pub const XBIT: u32 = 1 << 7;
+pub const YBIT: u32 = 1 << 8;
+pub const ZBIT: u32 = 1 << 9;
+pub const SBIT: u32 = 1 << 10;
+pub const DBIT: u32 = 1 << 11;
+pub const WBIT: u32 = 1 << 12;
+pub const MBIT: u32 = 1 << 13;

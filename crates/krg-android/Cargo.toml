@@ -11,6 +11,7 @@ name = "kurogane"
 crate-type = ["cdylib"]
 
 [dependencies]
+krg-vm = { path = "../krg-vm" }
 krg-core = { path = "../krg-core" }
 krg-format = { path = "../krg-format" }
 krg-gfx = { path = "../krg-gfx" }

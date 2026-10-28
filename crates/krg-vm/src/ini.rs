@@ -373,3 +373,24 @@ mod tests {
         assert_eq!(n, "command");
     }
 }
+
+/// Read the [Files] section of a character .def into a lowercased map
+/// (kfm.def: cmd/st/stcommon/sprite/anim/sound).
+pub fn read_def_files(def_text: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let lines = split_and_trim(def_text, "\n");
+    let mut i = 0usize;
+    loop {
+        let (is, name, _) = read_ini_section(&lines, &mut i);
+        if name.is_empty() {
+            break;
+        }
+        let n = name.trim_end_matches(']').trim().to_lowercase();
+        if n == "files" {
+            for (k, v) in is.iter() {
+                out.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    out
+}

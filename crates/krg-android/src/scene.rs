@@ -26,6 +26,7 @@ use krg_format::{
 };
 use krg_gfx::{Quad, Renderer, BLENDS_ADD, BLENDS_ALPHA};
 use krg_input::bits;
+use krg_vm::runtime::{compile_char, Fight, GlobalInfo};
 
 /// Texture-LRU source slots (one renderer LRU, several SFFs).
 const SRC_STAGE: u32 = 0;
@@ -77,6 +78,77 @@ enum Mode {
     Fight,
 }
 
+/// The live fight runtime (krg-vm) + its compiled character data. When the
+/// VM files can't be assembled the scene falls back to the static demo.
+struct FightRun {
+    fight: Fight,
+    /// 60Hz tick accumulator (ms).
+    tick_acc: f64,
+}
+
+impl FightRun {
+    /// Assemble the compiled char from a content root: the char folder's
+    /// def → cmd/st/air, plus the bundled common files (common.cmd merged
+    /// into cmd text per compiler.go:8628, common.const, common.air and
+    /// stcommon → common1.cns.zss via the fallback).
+    fn load(root: &Path) -> Option<FightRun> {
+        let char_dir = find_char_dir(root)?;
+        let def_path = def_of(&char_dir)?;
+        let def_text = read_text(&def_path)?;
+        let files = krg_vm::ini::read_def_files(&def_text);
+
+        let read = |rel: &str| -> Option<String> {
+            // resolve relative to the char dir, then the content root
+            let p = char_dir.join(rel);
+            if p.is_file() {
+                return read_text(&p);
+            }
+            let p = root.join(rel);
+            if p.is_file() {
+                return read_text(&p);
+            }
+            None
+        };
+
+        let cmd = files.get("cmd").and_then(|c| read(c))?;
+        // common.cmd appended after the char's own (compiler.go:8628)
+        let cmd = match read("data/common.cmd") {
+            Some(cc) => format!("{cmd}\n{cc}"),
+            None => cmd,
+        };
+        let mut cns_texts = Vec::new();
+        for key in ["st", "st0", "st1", "st2", "st3", "st4", "st5", "st6"] {
+            if let Some(t) = files.get(key).and_then(|v| read(v)) {
+                cns_texts.push(t);
+            }
+        }
+        if cns_texts.is_empty() {
+            return None;
+        }
+        // stcommon: common1.cns → falls back to the .zss (7181-7195)
+        let stcommon = files
+            .get("stcommon")
+            .and_then(|v| read(v))
+            .or_else(|| read("data/common1.cns.zss"));
+        let common_const = read("data/common.const")?;
+        let kfm_air = files.get("anim").and_then(|v| read(v))?;
+        let common_air = read("data/common.air").unwrap_or_default();
+
+        let gi = compile_char(
+            "kfm",
+            &cmd,
+            &cns_texts,
+            stcommon.as_deref(),
+            &common_const,
+            &[common_air, kfm_air],
+        )
+        .map_err(|e| log::warn!("scene: char compile: {e}"))
+        .ok()?;
+        let fight = Fight::new_1v1(gi, 42);
+        Some(FightRun { fight, tick_acc: 0.0 })
+    }
+}
+
 pub struct Scene {
     mode: Mode,
     cursor: usize,
@@ -100,6 +172,8 @@ pub struct Scene {
 
     fighters: [Fighter; 2],
     prev_input: u32,
+    /// Live krg-vm fight (None → static standing demo).
+    fight: Option<FightRun>,
 }
 
 impl Scene {
@@ -143,6 +217,7 @@ impl Scene {
 
         let stage = find_stage(root);
         let font = find_font(root);
+        let fight = FightRun::load(root);
 
         // Fighter placement: stage data when present, template defaults.
         let (p1, p2) = match &stage {
@@ -211,6 +286,7 @@ impl Scene {
             last: Instant::now(),
             fighters: [p1, p2],
             prev_input: 0,
+            fight,
         })
     }
 
@@ -262,6 +338,17 @@ impl Scene {
                 if pressed & bits::B != 0 {
                     self.mode = Mode::Menu;
                 }
+                // step the live runtime at 60Hz with the touch bits
+                if let Some(fr) = self.fight.as_mut() {
+                    fr.tick_acc += dt.min(100.0);
+                    const MS: f64 = 1000.0 / 60.0;
+                    let mut ticks = 0;
+                    while fr.tick_acc >= MS && ticks < 4 {
+                        fr.tick_acc -= MS;
+                        fr.fight.step_bits(held, 0); // P2 idle for now
+                        ticks += 1;
+                    }
+                }
                 self.draw_fight(r);
             }
         }
@@ -304,6 +391,48 @@ impl Scene {
     fn draw_fight(&mut self, r: &mut Renderer) {
         self.draw_stage_layer(r, 0);
 
+        let scl = self.stage.as_ref().map(|s| s.scl).unwrap_or(1.0);
+        if let Some(fr) = self.fight.as_mut() {
+            // ── live krg-vm fighters ────────────────────────────────────
+            let snap = fr.fight.snapshot();
+            let ground_y = self.stage.as_ref().map(|s| s.def.zoffset as f32 * s.scl)
+                .unwrap_or(GAME_H - 32.0);
+            for cd in &snap.chars {
+                let Some(a) = fr.fight.chars[0].gi.anims.anims.get(&cd.anim_no) else {
+                    continue;
+                };
+                let Some(f) = a.frames.get(cd.frame_idx.max(0) as usize) else {
+                    continue;
+                };
+                if f.group < 0 {
+                    continue;
+                }
+                let xs = f.hscale as f32 * f.xscale * cd.xscale * cd.facing as f32 * scl;
+                let ys = f.vscale as f32 * f.yscale * cd.yscale * scl;
+                let blend = if f.trans_type == TransType::Add {
+                    BLENDS_ADD
+                } else {
+                    BLENDS_ALPHA
+                };
+                let _ = r.push_sprite(
+                    &mut self.char_cache,
+                    SRC_CHAR,
+                    f.group as u16,
+                    f.number as u16,
+                    GAME_W / 2.0 + cd.pos[0] * scl,
+                    ground_y - cd.pos[1] * scl,
+                    xs,
+                    ys,
+                    WHITE,
+                    blend,
+                );
+            }
+            self.draw_stage_layer(r, 1);
+            self.draw_hud(r, &snap);
+            return;
+        }
+
+        // ── static fallback demo ─────────────────────────────────────────
         // Fighters (shared kfm standing anim, mirrored for P2).
         let i = self.frame_at(self.t_ms).min(self.anim.frames.len() - 1);
         let f = &self.anim.frames[i];
@@ -315,7 +444,6 @@ impl Scene {
             } else {
                 BLENDS_ALPHA
             };
-            let scl = self.stage.as_ref().map(|s| s.scl).unwrap_or(1.0);
             for fighter in &self.fighters {
                 let _ = r.push_sprite(
                     &mut self.char_cache,
@@ -338,6 +466,89 @@ impl Scene {
         if let Some(fr) = self.font.as_ref() {
             let w = fr.metrics.text_width("B:MENU") as f32;
             self.draw_text(r, "B:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
+        }
+    }
+
+    // ── HUD ───────────────────────────────────────────────────────────────────
+
+    /// The fight HUD: life bars (P1 left, P2 right), power bars, timer.
+    /// First real fight-screen milestone — the motif-driven bars land with
+    /// the fightscreen port.
+    fn draw_hud(&mut self, r: &mut Renderer, snap: &krg_vm::runtime::FightSnapshot) {
+        const BAR_Y: f32 = 8.0;
+        const BAR_W: f32 = 110.0;
+        const BAR_H: f32 = 8.0;
+        const POW_Y: f32 = BAR_Y + BAR_H + 2.0;
+        const POW_H: f32 = 4.0;
+        let bg = [24, 24, 32, 255];
+        let frame = [255, 255, 255, 255];
+        let yellow = [255, 232, 72, 255];
+        let blue = [64, 132, 255, 255];
+        let red = [228, 44, 44, 255];
+
+        for (i, cd) in snap.chars.iter().enumerate() {
+            let (x0, right) = if i == 0 { (5.0, false) } else { (GAME_W - 5.0, true) };
+            let life_frac = (cd.life as f32 / cd.life_max as f32).clamp(0.0, 1.0);
+            let pow_frac = (cd.power as f32 / cd.power_max.max(1) as f32).clamp(0.0, 1.0);
+
+            let quad = |x: f32, y: f32, w: f32, h: f32, c: [u8; 4]| Quad {
+                x, y, w, h, u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0,
+                color: c, angle: 0.0, px: 0.0, py: 0.0,
+            };
+
+            // life bar: bg → fill → frame
+            let bar_x = |frac: f32| if right { x0 - BAR_W * frac } else { x0 };
+            let fill_x = |frac: f32| if right { x0 - BAR_W * frac } else { x0 };
+            let _ = bar_x;
+            let bg_x = if right { x0 - BAR_W } else { x0 };
+            r.push(0, &quad(bg_x, BAR_Y, BAR_W, BAR_H, bg));
+            let fill = if right { quad(x0 - BAR_W * life_frac, BAR_Y, BAR_W * life_frac, BAR_H, yellow) }
+                       else { quad(x0, BAR_Y, BAR_W * life_frac, BAR_H, yellow) };
+            r.push(0, &fill);
+            // 1px frame
+            r.push(0, &quad(bg_x, BAR_Y, BAR_W, 1.0, frame));
+            r.push(0, &quad(bg_x, BAR_Y + BAR_H - 1.0, BAR_W, 1.0, frame));
+            r.push(0, &quad(bg_x, BAR_Y, 1.0, BAR_H, frame));
+            r.push(0, &quad(bg_x + BAR_W - 1.0, BAR_Y, 1.0, BAR_H, frame));
+
+            // power bar
+            let pbg_x = if right { x0 - BAR_W } else { x0 };
+            r.push(0, &quad(pbg_x, POW_Y, BAR_W, POW_H, bg));
+            let pfill = if right { quad(x0 - BAR_W * pow_frac, POW_Y, BAR_W * pow_frac, POW_H, blue) }
+                        else { quad(x0, POW_Y, BAR_W * pow_frac, POW_H, blue) };
+            r.push(0, &pfill);
+
+            // KO tint on the loser's bar
+            if !cd.alive {
+                r.push(0, &quad(bg_x, BAR_Y, BAR_W, BAR_H, [200, 32, 32, 120]));
+            }
+            let _ = fill_x;
+        }
+
+        // timer (MM:SS from ticks)
+        let texts: Vec<(String, f32, f32, f32, [u8; 4])> = {
+            let Some(fr) = self.font.as_ref() else {
+                return;
+            };
+            let t = snap.time_left.max(0);
+            let mut out = vec![];
+            let txt = format!("{:02}:{:02}", t / 60, t % 60);
+            let w = fr.metrics.text_width(&txt) as f32;
+            out.push((txt, (GAME_W - w) / 2.0, BAR_Y - 2.0, 1.0, WHITE));
+            if snap.round_state < 2 {
+                let msg = if snap.round_state == 0 { "GET READY" } else { "ROUND 1" };
+                let w = fr.metrics.text_width(msg) as f32;
+                out.push((msg.into(), (GAME_W - w) / 2.0, GAME_H / 2.0 - 20.0, 1.0, YELLOW));
+            }
+            if snap.round_state >= 3 {
+                let msg = "K.O.";
+                let w = fr.metrics.text_width(msg) as f32;
+                out.push((msg.into(), (GAME_W - w) / 2.0, GAME_H / 2.0 - 20.0, 2.0, red));
+            }
+            out
+        };
+        for (t, x, y, s, c) in texts {
+            self.draw_text(r, &t, x, y, s, c);
         }
     }
 
@@ -641,6 +852,67 @@ fn find_font(root: &Path) -> Option<FontRun> {
                 log::debug!("scene: skip {}: {t}", p.display());
             }
             Err(e) => log::debug!("scene: skip {}: {e}", p.display()),
+        }
+    }
+    None
+}
+
+// ── FightRun helpers ──────────────────────────────────────────────────────────
+
+/// UTF-8 text read with BOM strip (krg-vm ini::load_text semantics).
+fn read_text(p: &Path) -> Option<String> {
+    let b = std::fs::read(p)
+        .map_err(|e| log::warn!("scene: {}: {e}", p.display()))
+        .ok()?;
+    Some(krg_vm::ini::load_text(&b))
+}
+
+/// The first `<dir>/*.def` that has a [Files] section with a cmd.
+fn def_of(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<PathBuf> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("def")).unwrap_or(false) {
+            // Prefer `<name>.def` matching the folder name (kfm/kfm.def)
+            if best.is_none() {
+                best = Some(p.clone());
+            }
+            let stem_matches = p.file_stem() == dir.file_name();
+            if stem_matches {
+                return Some(p);
+            }
+        }
+    }
+    best
+}
+
+/// The char folder with an SFF (kfm first, like find_char_sff).
+fn find_char_dir(root: &Path) -> Option<PathBuf> {
+    let candidates = ["chars/kfm", "chars/kfm720", "data/kfm"];
+    for c in candidates {
+        let p = root.join(c);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let chars = root.join("chars");
+    let rd = std::fs::read_dir(chars).ok()?;
+    for e in rd.flatten() {
+        let dir = e.path();
+        if dir.is_dir() {
+            let mut has_sff = false;
+            if let Ok(files) = std::fs::read_dir(&dir) {
+                has_sff = files.flatten().any(|f| {
+                    f.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case("sff"))
+                        .unwrap_or(false)
+                });
+            }
+            if has_sff {
+                return Some(dir);
+            }
         }
     }
     None
