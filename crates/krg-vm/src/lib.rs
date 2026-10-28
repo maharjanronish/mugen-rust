@@ -22,6 +22,7 @@ pub mod cmd;
 pub mod cns;
 pub mod eval;
 pub mod exp;
+pub mod ini;
 pub mod lex;
 pub mod op;
 pub mod runtime;
