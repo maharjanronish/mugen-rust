@@ -216,7 +216,7 @@ public final class ControllerView extends View {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         choreographer.removeFrameCallback(frameCb);
-        cancelLongPress();
+        cancelHoldDetect();
     }
 
     @Override
@@ -265,7 +265,7 @@ public final class ControllerView extends View {
                 if (lpPointer >= 0) {
                     int i = e.findPointerIndex(lpPointer);
                     if (i < 0 || Math.hypot(e.getX(i) - lpX, e.getY(i) - lpY) > EDIT_LONGPRESS_SLOP) {
-                        cancelLongPress();
+                        cancelHoldDetect();
                     }
                 }
                 for (int i = 0; i < e.getPointerCount(); i++) {
@@ -275,11 +275,11 @@ public final class ControllerView extends View {
             }
             case MotionEvent.ACTION_POINTER_UP:
             case MotionEvent.ACTION_UP:
-                cancelLongPress();
+                cancelHoldDetect();
                 send(e, idx, 2);
                 break;
             case MotionEvent.ACTION_CANCEL:
-                cancelLongPress();
+                cancelHoldDetect();
                 for (int i = 0; i < e.getPointerCount(); i++) {
                     send(e, i, 2);
                 }
@@ -289,21 +289,23 @@ public final class ControllerView extends View {
     }
 
     private void armLongPress(int pointerId, float x, float y) {
-        cancelLongPress();
+        cancelHoldDetect();
         lpPointer = pointerId;
         lpX = x;
         lpY = y;
         handler.postDelayed(longPressRunnable, EDIT_LONGPRESS_MS);
     }
 
-    private void cancelLongPress() {
+    // NB: deliberately NOT named cancelLongPress() — that exists as public on
+    // android.view.View, and a weaker-access override fails compilation.
+    private void cancelHoldDetect() {
         handler.removeCallbacks(longPressRunnable);
         lpPointer = -1;
     }
 
     /** Open the editor. `grabPointer` (if >= 0) keeps dragging the control at (x, y). */
     private void enterEditMode(int grabPointer, float x, float y) {
-        cancelLongPress();
+        cancelHoldDetect();
         nativeInputEditBegin(); // Rust snapshots the layout + clears held buttons
         editMode = true;
         selKind = -1;
