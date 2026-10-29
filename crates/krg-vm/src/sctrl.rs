@@ -1692,7 +1692,7 @@ pub struct HitDefT {
     pub guard_kill: Option<bool>,
     pub fall_kill: Option<bool>,
     pub hitonce: bool,
-    pub air_juggle: i32,
+    pub air_juggle: Option<i32>,
     pub getpower: [i32; 2],
     pub givepower: [i32; 2],
     pub damage: [i32; 2],
@@ -2620,7 +2620,9 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.guard_kill = ev_opt_b(sc, GUARD_KILL, host);
     h.fall_kill = ev_opt_b(sc, FALL_KILL, host);
     h.hitonce = ev_b(sc, HITONCE, host, false);
-    h.air_juggle = ev_i(sc, AIR_JUGGLE, host, 0);
+    // air.juggle unset (IErr in Go) — only projectiles and Ikemen-version
+    // chars use it to override the StateDef juggle cost (char.go:1078-1085)
+    h.air_juggle = ev_opt_i(sc, AIR_JUGGLE, host);
     h.getpower = [ev_i(sc, GETPOWER, host, 0), ev_i(sc, GETPOWER + 1, host, 0)];
     h.givepower = [ev_i(sc, GIVEPOWER, host, 0), ev_i(sc, GIVEPOWER + 1, host, 0)];
     h.damage = [ev_i(sc, DAMAGE, host, 0), ev_i(sc, DAMAGE + 1, host, 0)];

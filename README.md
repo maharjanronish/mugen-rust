@@ -173,7 +173,9 @@ to git.
 ## Host-side checks (CI)
 
 ```bash
-cargo test                # 37 tests: round-trips, quirks, Go-parity, real-file fixtures
+cargo test                # 149 tests: round-trips, quirks, Go-parity, real-file
+                          # fixtures, fight/gethit/device regressions (juggle,
+                          # corner, stage-end, real-CPU stage walk)
 cargo run --release -p krg-sfftool --bin krg-bench
 cargo run --release -p krg-sfftool -- path/to/char.sff --decode-all
 cargo run --release -p krg-sfftool -- path/to/char.air
@@ -201,6 +203,8 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 | Command system (input.go port) | ✅ v0.9 | SOCD/assist/charge/>/\$/\* syntax, buffer timers, .cmd compiler |
 | Char runtime: states, physics, hit detection, rounds, camera | ✅ v0.9 | KFM walks/crouches/jumps/punches; clsn hits, gethit, KO, next round, P2 CPU |
 | Gethit chain + fall/tech/getup (char.go 12581 port) | ✅ v0.9.1 | hitshaketime/hittime tick down, fall → liedown → getup → 0; air hits tumble with yaccel 0.35 gravity |
+| Juggle system (char.go 14147/12092/12148 port) | ✅ v0.9.2 | ghv.targeted_by points + StateDef juggle cost + the hit gate — fixes chain-hit victims floating out of the ceiling |
+| Player push corner redistribution (char.go 14755 port) | ✅ v0.9.2 | cornered char keeps the wall, presser absorbs the full push; screen-edge clamp is position-only (xScreenBound) |
 | ZSS function calls (`call IkSys_*`) | ✅ v0.9.1 | were a silent no-op stub; ret slots fixed; same-number changeAnim keeps progress (Ikemen object semantics) |
 | Guard / blocking (char.go 11429 + 11650 port) | ✅ v0.9.1 | guardflag gate, chip damage, guard states 150-155, guard.* fallback chain (guard.velocity ← ground.velocity) |
 | Match restart (rematch) | ✅ v0.9.1 | Fight::restart_match + MATCH OVER → TAP A: REMATCH scene flow |

@@ -177,6 +177,28 @@ impl AnimState {
 
 // ── gethit vars ──────────────────────────────────────────────────────────────
 
+impl GetHitVar {
+    /// char.go:1294 getJuggle — remaining points for one attacker, or the
+    /// default (airjuggle) when that attacker has not hit us yet.
+    pub fn get_juggle(&self, id: i32, default: i32) -> i32 {
+        for &(tid, pts) in &self.targeted_by {
+            if tid == id {
+                return pts;
+            }
+        }
+        default
+    }
+
+    /// char.go:1312 addId — (re)register an attacker, PRESERVING whatever
+    /// juggle points they still have against us, and moving their entry to
+    /// the back (the subtraction targets the last entry).
+    pub fn add_target_id(&mut self, id: i32, juggle: i32) {
+        let pts = self.get_juggle(id, juggle);
+        self.targeted_by.retain(|&(tid, _)| tid != id);
+        self.targeted_by.push((id, pts));
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GetHitVar {
     pub xvel: f32,
@@ -203,6 +225,11 @@ pub struct GetHitVar {
     pub fall: bool,
     /// ticks spent falling (char.go fall_time — steps even during hitshake)
     pub fall_time: i32,
+    /// (attacker id, remaining juggle points) — char.go ghv.targetedBy.
+    /// Points persist across the victim's recovery (only a full ghv reset
+    /// or TargetDrop clears them), and gate how long an airborne victim
+    /// can keep being re-hit (the juggle system).
+    pub targeted_by: Vec<(i32, i32)>,
     /// HitDef fall.recover: tech recovery allowed (canRecover gate)
     pub fall_recover: bool,
     /// HitDef fall.recovertime: ticks before tech recovery unlocks
@@ -281,6 +308,13 @@ pub struct CharState {
     pub locals: Vec<Value>,
     // targeting
     pub targets: Vec<i32>,
+    /// Current juggle cost of our active attack state (char.go c.juggle):
+    /// set from StateDef `juggle =` on state entry (kfm's attacks cost
+    /// 1-7), consumed (reset to 0) by the first hit that juggle-subtracts.
+    pub juggle: i32,
+    /// ghv.fall snapshot taken before this tick's hit resolution
+    /// (char.go prevfallflag) — "was the victim already falling".
+    pub prev_fall: bool,
     // fighting helper fields
     pub airjump_count: i32,
     pub inguarddist: bool,
@@ -312,6 +346,8 @@ const ASF_NOCROUCH: u64 = 1 << 21;
 const ASF_NOJUMP: u64 = 1 << 38;
 const ASF_NOAUTOTURN: u64 = 1 << 2;
 const ASF_NOBRAKE: u64 = 1 << 18;
+/// sctrl::asf::NOJUGGLECHECK — AssertSpecial flag bypassing the juggle gate
+const ASF_NOJUGGLECHECK: u64 = 1 << 4;
 /// sctrl::asf::NOGETUPFROMLIEDOWN — AssertSpecial gate on the 5110→5120 getup
 const ASF_NOGETUPFROMLIEDOWN: u64 = 1 << 29;
 
@@ -379,6 +415,8 @@ impl CharState {
             anim: AnimState::default(),
             locals: Vec::new(),
             targets: Vec::new(),
+            juggle: 0,
+            prev_fall: false,
             airjump_count: 0,
             inguarddist: false,
             guard_flag: false,
@@ -529,8 +567,14 @@ impl CharState {
                 SD_SPRPRIORITY => {
                     self.sprpriority = eval(exp, self as &mut dyn Ctx).to_i();
                 }
+                SD_JUGGLE => {
+                    // char.go stateDef_juggle (bytecode.go:5476): the state's
+                    // juggle-point cost — what an air hit from this state
+                    // subtracts from the victim (kfm attacks: 1-7).
+                    self.juggle = eval(exp, self as &mut dyn Ctx).to_i();
+                }
                 _ => {
-                    let _ = (SD_HITCOUNTPERSIST, SD_FACEP2, SD_JUGGLE);
+                    let _ = (SD_HITCOUNTPERSIST, SD_FACEP2);
                 }
             }
         }
@@ -1280,6 +1324,11 @@ impl CharRuntime for CharState {
         self.hitdef = Some(hd.clone());
         self.hitdef_attr_st = hd.attr_st;
         self.hitdef_attr_kind = hd.attr_kind;
+        // char.go:1078-1085 — HitDef air.juggle overrides the statedef
+        // juggle cost when specified (MUGEN-version chars never set it).
+        if let Some(j) = hd.air_juggle {
+            self.juggle = j;
+        }
     }
     fn reversal_def(&mut self, hd: &HitDefT) {}
     fn not_hit_by(&mut self, slot: i32, time: i32, st: i32, kind: i32, not: bool) {
@@ -1686,11 +1735,27 @@ impl Fight {
 
         // ── 2/3/4. per-char action (prepare → run → physics) ─────────────
         for i in 0..self.chars.len() {
+            // prevfallflag (char.go:12706): ghv.fall as of tick start —
+            // hit resolution compares "was already falling" against it.
+            self.chars[i].prev_fall = self.chars[i].ghv.fall;
             // hitpause gating (actionPrepare/actionRun skip when paused)
             if self.chars[i].hitpause_time > 0 {
                 self.chars[i].hitpause_time -= 1;
                 // frozen this frame (Go keeps anim frozen too)
                 continue;
+            }
+            // dropTargets (char.go:10387, called from actionRun): release
+            // targets that left movetype H — a recovered opponent stops
+            // counting as our target, so the next launcher always lands
+            // (the MUGEN !hasTarget juggle rule).
+            {
+                let released: Vec<i32> = self
+                    .chars
+                    .iter()
+                    .filter(|c| c.move_type != MoveTypeT::H)
+                    .map(|c| c.id)
+                    .collect();
+                self.chars[i].targets.retain(|&tid| !released.contains(&tid));
             }
             // SCF_guard (char.go:12467): the char is "guarding" when holding
             // back with ctrl in a non-attacking state, or while inside the
@@ -1816,6 +1881,10 @@ impl Fight {
         c.no_push = false;
         c.hit_count = 0;
         c.uniq_hit_count = 0;
+        // targeting + juggle cost fully re-armed (clearState dropTargets)
+        c.targets.clear();
+        c.juggle = 0;
+        c.prev_fall = false;
         // gethit vars fully re-armed (a KO'd char carries a dead ghv)
         c.ghv = GetHitVar {
             hittime: -1,
@@ -2062,21 +2131,14 @@ impl Fight {
                 }
             }
         }
-        // screen-edge push (char.go screenbound): chars stay within the
-        // camera view — 10px margin inside the half-screen
+        // screen-edge clamp (xScreenBound, char.go:10323): clamp POSITION
+        // only. MUGEN never zeroes velocity at the edge — the walk state
+        // re-sets vel each tick anyway, and zeroing here was killing jump
+        // arcs and gethit slides that touched the edge (chars dropped
+        // straight down / stopped dead — the "stuck at stage end" feel).
         let left = self.cam_x - (self.view_half_w - 10.0);
         let right = self.cam_x + (self.view_half_w - 10.0);
-        if c.pos[0] < left {
-            c.pos[0] = left;
-            if c.vel[0] < 0.0 {
-                c.vel[0] = 0.0;
-            }
-        } else if c.pos[0] > right {
-            c.pos[0] = right;
-            if c.vel[0] > 0.0 {
-                c.vel[0] = 0.0;
-            }
-        }
+        c.pos[0] = c.pos[0].clamp(left, right);
     }
 
     /// Player push (char.go:14522 pushDetection, 2D x-axis subset).
@@ -2168,12 +2230,49 @@ impl Fight {
                 // split the overlap: each side gives way by half
                 let a_left = a.pos[0] <= d.pos[0];
                 let (da, dd) = (ov * 0.5, ov * 0.5);
+                let a_old = a.pos[0];
+                let d_old = d.pos[0];
                 if a_left {
                     self.chars[ai].pos[0] -= da;
                     self.chars[di].pos[0] += dd;
                 } else {
                     self.chars[ai].pos[0] += da;
                     self.chars[di].pos[0] -= dd;
+                }
+                // xScreenBound both after the push (char.go:14754)
+                let vl = self.cam_x - (self.view_half_w - 10.0);
+                let vr = self.cam_x + (self.view_half_w - 10.0);
+                self.chars[ai].pos[0] = self.chars[ai].pos[0].clamp(vl, vr);
+                self.chars[di].pos[0] = self.chars[di].pos[0].clamp(vl, vr);
+                // ── corner redistribution (char.go:14755-14782) ─────────────
+                // When one side is pinned at the screen edge and could not
+                // take its half of the push, the OTHER side takes the full
+                // remaining overlap (pushfactor 1). Without this a walking
+                // opponent pins a cornered player against the wall forever —
+                // the "stuck at the end of the stage" bug.
+                {
+                    const EPS: f32 = 0.0001;
+                    let a_actual = (self.chars[ai].pos[0] - a_old).abs();
+                    let d_actual = (self.chars[di].pos[0] - d_old).abs();
+                    let a_cornered = a_actual + EPS < da;
+                    let d_cornered = d_actual + EPS < dd;
+                    if a_cornered && !d_cornered {
+                        // a pinned: d absorbs the full overlap
+                        let extra = ov - d_actual;
+                        let dir = (self.chars[di].pos[0] - d_old).signum();
+                        if extra > 0.0 && dir != 0.0 {
+                            self.chars[di].pos[0] += extra * dir;
+                            self.chars[di].pos[0] = self.chars[di].pos[0].clamp(vl, vr);
+                        }
+                    } else if d_cornered && !a_cornered {
+                        // d pinned: a absorbs the full overlap
+                        let extra = ov - a_actual;
+                        let dir = (self.chars[ai].pos[0] - a_old).signum();
+                        if extra > 0.0 && dir != 0.0 {
+                            self.chars[ai].pos[0] += extra * dir;
+                            self.chars[ai].pos[0] = self.chars[ai].pos[0].clamp(vl, vr);
+                        }
+                    }
                 }
             }
         }
@@ -2210,6 +2309,19 @@ impl Fight {
                 // hasTargetOfHitdef) — without this the same hitdef lands
                 // every frame, which reads as a one-hit KO.
                 if a.hitdef_targets.contains(&d.id) {
+                    continue;
+                }
+                // ── juggle gate (char.go:14147-14155) ─────────────────────────
+                // A hit on an opponent we already hold as a target costs
+                // juggle points; once drained the hit whiffs. Without this
+                // every air hit re-launched the victim upward forever —
+                // the "escapes through the ceiling / floats mid-air" bug.
+                // MUGEN rule: an enemy that is NOT yet our target can
+                // always be hit (fresh launcher after they recover).
+                let no_juggle_check = a.asf & ASF_NOJUGGLECHECK != 0;
+                let points = d.ghv.get_juggle(a.id, a.gi.data.airjuggle);
+                let has_target = a.targets.contains(&d.id);
+                if !no_juggle_check && a.juggle > points && has_target {
                     continue;
                 }
                 let Some(danim) = d.gi.anims.anims.get(&d.anim.anim_no) else {
@@ -2269,6 +2381,10 @@ impl Fight {
             let defender_def = self.chars[di].defence_mul * self.chars[di].gi.data.defence as f32 / 100.0;
             let attacker_facing = self.chars[ai].facing;
             let attacker_id = self.chars[ai].id;
+            // juggle cost + nojugglecheck snapshot (the d borrow below
+            // blocks reaching the attacker for the rest of the resolve)
+            let attacker_juggle = self.chars[ai].juggle;
+            let no_juggle_check_attacker = self.chars[ai].asf & ASF_NOJUGGLECHECK != 0;
             let dmg = (hd.damage[0] as f32 * attacker_attack / defender_def) as i32;
             let d = &mut self.chars[di];
             // hitflag vs statetype: H/S, L/C, A/A — simplified map
@@ -2337,6 +2453,13 @@ impl Fight {
                 let a2 = &mut self.chars[ai];
                 a2.hitpause_time = hd.guard_pausetime[0].max(0);
                 a2.uniq_hit_count += 1;
+                // guard still registers the pair (char.go:12092 runs for
+                // both hit and guard) — points preserved, no cost spent
+                if !a2.targets.contains(&d_id) {
+                    a2.targets.push(d_id);
+                }
+                let airjuggle_g = self.chars[di].gi.data.airjuggle;
+                self.chars[di].ghv.add_target_id(attacker_id, airjuggle_g);
                 continue; // guard resolved — no hit resolution this contact
             }
             d.life -= dmg;
@@ -2387,6 +2510,21 @@ impl Fight {
                 hd.down_recovertime
             };
             d.ghv.id = attacker_id;
+            // ── juggle bookkeeping (char.go:12092-12098 + 12148-12162) ──────
+            // addId registers the attacker on the victim, PRESERVING their
+            // remaining points; then, if the victim was already falling
+            // (prevfallflag) or this hit knocked them into a fall, the
+            // attacker's current statedef juggle cost is spent. The cost is
+            // consumed (juggle = 0) so later contacts from the same state
+            // (multi-hit moves) ride free, like Go.
+            let airjuggle = d.gi.data.airjuggle;
+            d.ghv.add_target_id(attacker_id, airjuggle);
+            let spent_fall = d.prev_fall || d.ghv.fall;
+            if spent_fall && !no_juggle_check_attacker {
+                if let Some(last) = d.ghv.targeted_by.last_mut() {
+                    *last = (last.0, last.1 - attacker_juggle);
+                }
+            }
             // hitpause (char.go:14301/14306): the defender freezes for
             // pausetime[1] (the shake), the attacker for pausetime[0].
             // The old code used pausetime[0]+1 for BOTH — wrong for every
@@ -2418,6 +2556,15 @@ impl Fight {
             let a2 = &mut self.chars[ai];
             a2.hitpause_time = hd.pausetime[0].max(0);
             a2.uniq_hit_count += 1;
+            // juggle cost is spent on the first fall hit (char.go:12161)
+            if spent_fall {
+                a2.juggle = 0;
+            }
+            // addTarget (char.go:12096): the victim enters our target list —
+            // this is what the juggle gate's hasTarget check reads.
+            if !a2.targets.contains(&d_id) {
+                a2.targets.push(d_id);
+            }
         }
     }
 }
