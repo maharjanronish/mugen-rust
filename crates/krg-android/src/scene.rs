@@ -46,7 +46,6 @@ const GAME_H: f32 = 240.0;
 /// Placeholder menu — the mode logic behind each item lands with the CNS/CMD
 /// VM milestone.
 const MENU_ITEMS: [&str; 4] = ["ARCADE", "VS MODE", "TRAINING", "OPTIONS"];
-
 /// Version shown in the menu corner — keep in sync with
 /// android/app/build.gradle.kts `versionName`.
 const VERSION: &str = "0.9.0";
@@ -168,6 +167,9 @@ pub struct Scene {
     cursor: usize,
     stage: Option<StageRun>,
     font: Option<FontRun>,
+    /// Game-space width this frame (240-height space; grows with the
+    /// phone aspect so the fight fills the whole screen — no pillarboxing).
+    game_w: f32,
 
     // kfm standing animation (shared by both fighters for now).
     char_cache: SpriteCache,
@@ -300,6 +302,7 @@ impl Scene {
         Some(Scene {
             mode,
             cursor: 0,
+            game_w: GAME_W,
             stage,
             font,
             char_cache: SpriteCache::new(sff, CPU_CHAR_BUDGET),
@@ -340,6 +343,13 @@ impl Scene {
         self.last = now;
         // Clamp so returning from background doesn't fast-forward the anim.
         self.t_ms += dt.min(100.0);
+
+        // aspect-driven game width (240-height space) + tell the fight VM
+        let gw = r.game_extents().0;
+        self.game_w = gw;
+        if let Some(fr) = self.fight.as_mut() {
+            fr.fight.set_view_width(gw);
+        }
 
         // Input edges: pressed = held ∧ ¬previously held.
         let held = crate::controller_held();
@@ -406,7 +416,7 @@ impl Scene {
         self.draw_stage_layer(r, 0, 0.0, 0.0);
         self.draw_stage_layer(r, 1, 0.0, 0.0);
         // Dim the stage behind the menu.
-        let q = full_screen_quad([0, 0, 0, 170]);
+        let q = full_screen_quad(self.game_w, [0, 0, 0, 170]);
         r.push(0, &q);
 
         // Title block.
@@ -419,7 +429,7 @@ impl Scene {
             let color = if i == self.cursor { YELLOW } else { WHITE };
             let w = self.draw_text_centered(r, item, y, 1.0, color);
             if i == self.cursor {
-                let cx = GAME_W / 2.0 - w / 2.0;
+                let cx = self.game_w / 2.0 - w / 2.0;
                 self.draw_text(r, ">", cx - 12.0, y, 1.0, YELLOW);
             }
         }
@@ -428,7 +438,7 @@ impl Scene {
         self.draw_text_centered(r, "UP/DOWN + A", 226.0, 1.0, GRAY);
         if let Some(fr) = self.font.as_ref() {
             let w = fr.metrics.text_width(VERSION) as f32;
-            self.draw_text(r, VERSION, GAME_W - w - 4.0, 4.0, 1.0, GRAY);
+            self.draw_text(r, VERSION, self.game_w - w - 4.0, 4.0, 1.0, GRAY);
         }
     }
 
@@ -466,7 +476,8 @@ impl Scene {
                     SRC_CHAR,
                     f.group as u16,
                     f.number as u16,
-                    fighter.x,
+                    // recenter the 320-space demo anchors on the live view
+                    self.game_w / 2.0 + (fighter.x - GAME_W / 2.0),
                     fighter.y,
                     xs * fighter.facing * scl,
                     ys * scl,
@@ -481,7 +492,7 @@ impl Scene {
         // Corner hint (back to menu).
         if let Some(fr) = self.font.as_ref() {
             let w = fr.metrics.text_width("HOLD START:MENU") as f32;
-            self.draw_text(r, "HOLD START:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
+            self.draw_text(r, "HOLD START:MENU", self.game_w - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
         }
     }
 
@@ -520,7 +531,7 @@ impl Scene {
                 SRC_CHAR,
                 f.group as u16,
                 f.number as u16,
-                GAME_W / 2.0 + (cd.pos[0] - snap.cam_x) * scl,
+                self.game_w / 2.0 + (cd.pos[0] - snap.cam_x) * scl,
                 // MUGEN y-axis: pos.y is negative ABOVE the floor, so the
                 // screen y is ground + pos.y (camera y is ≤ 0, subtracting it
                 // shifts the world down when the camera rises — same term the
@@ -548,7 +559,7 @@ impl Scene {
         let red = [228, 44, 44, 255];
 
         for (i, cd) in snap.chars.iter().enumerate() {
-            let (x0, right) = if i == 0 { (5.0, false) } else { (GAME_W - 5.0, true) };
+            let (x0, right) = if i == 0 { (5.0, false) } else { (self.game_w - 5.0, true) };
             let life_frac = (cd.life as f32 / cd.life_max as f32).clamp(0.0, 1.0);
             let pow_frac = (cd.power as f32 / cd.power_max.max(1) as f32).clamp(0.0, 1.0);
 
@@ -595,16 +606,16 @@ impl Scene {
             let mut out = vec![];
             let txt = format!("{:02}:{:02}", t / 60, t % 60);
             let w = fr.metrics.text_width(&txt) as f32;
-            out.push((txt, (GAME_W - w) / 2.0, BAR_Y - 2.0, 1.0, WHITE));
+            out.push((txt, (self.game_w - w) / 2.0, BAR_Y - 2.0, 1.0, WHITE));
             if snap.round_state < 2 {
                 let msg = if snap.round_state == 0 { "GET READY" } else { "ROUND 1" };
                 let w = fr.metrics.text_width(msg) as f32;
-                out.push((msg.into(), (GAME_W - w) / 2.0, GAME_H / 2.0 - 20.0, 1.0, YELLOW));
+                out.push((msg.into(), (self.game_w - w) / 2.0, GAME_H / 2.0 - 20.0, 1.0, YELLOW));
             }
             if snap.round_state >= 3 {
                 let msg = "K.O.";
                 let w = fr.metrics.text_width(msg) as f32;
-                out.push((msg.into(), (GAME_W - w) / 2.0, GAME_H / 2.0 - 20.0, 2.0, red));
+                out.push((msg.into(), (self.game_w - w) / 2.0, GAME_H / 2.0 - 20.0, 2.0, red));
             }
             out
         };
@@ -615,7 +626,7 @@ impl Scene {
         // exit hint (START is also round-start, so a hold — not a tap — exits)
         if let Some(fr) = self.font.as_ref() {
             let w = fr.metrics.text_width("HOLD START:MENU") as f32;
-            self.draw_text(r, "HOLD START:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
+            self.draw_text(r, "HOLD START:MENU", self.game_w - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
         }
     }
 
@@ -645,7 +656,7 @@ impl Scene {
                 continue;
             }
             let scl = st.scl;
-            let x = GAME_W / 2.0 + bg.start[0] * scl - cam_x * scl;
+            let x = self.game_w / 2.0 + bg.start[0] * scl - cam_x * scl;
             let y = bg.start[1] * scl - cam_y * scl;
             let xs = if bg.ty == BgType::Parallax {
                 parallax_scale(bg, w)
@@ -654,7 +665,7 @@ impl Scene {
             } * scl;
             let (blend, color) = trans_blend(bg);
             let step = (w * xs + bg.tilespacing[0] as f32 * scl).max(1.0);
-            for k in tile_copies(bg.tile[0], x, w * xs) {
+            for k in tile_copies(bg.tile[0], x, w * xs, self.game_w) {
                 let _ = r.push_sprite(
                     &mut st.cache,
                     SRC_STAGE,
@@ -727,16 +738,17 @@ impl Scene {
             .as_ref()
             .map(|f| f.metrics.text_width(text) as f32 * scale)
             .unwrap_or(0.0);
-        self.draw_text(r, text, GAME_W / 2.0 - w / 2.0, y, scale, color)
+        self.draw_text(r, text, self.game_w / 2.0 - w / 2.0, y, scale, color)
     }
 }
 
 /// Full-screen flat color quad (drawn against the shared white texture).
-fn full_screen_quad(color: [u8; 4]) -> Quad {
+/// `gw` is the live game-space width (aspect-driven).
+fn full_screen_quad(gw: f32, color: [u8; 4]) -> Quad {
     Quad {
         x: 0.0,
         y: 0.0,
-        w: GAME_W,
+        w: gw,
         h: GAME_H,
         u0: 0.0,
         v0: 0.0,
@@ -744,7 +756,7 @@ fn full_screen_quad(color: [u8; 4]) -> Quad {
         v1: 1.0,
         color,
         angle: 0.0,
-        px: GAME_W / 2.0,
+        px: gw / 2.0,
         py: GAME_H / 2.0,
     }
 }
@@ -786,7 +798,7 @@ fn trans_blend(bg: &krg_format::BgElement) -> (u8, [u8; 4]) {
 
 /// Tile copy offsets along x: `0` = single copy, `1` = cover the screen
 /// (both directions), `n > 1` = n copies right of the base.
-fn tile_copies(tile: i32, x: f32, w: f32) -> Vec<i32> {
+fn tile_copies(tile: i32, x: f32, w: f32, bound: f32) -> Vec<i32> {
     match tile {
         0 => vec![0],
         n if n > 1 => (0..n).collect(),
@@ -794,7 +806,7 @@ fn tile_copies(tile: i32, x: f32, w: f32) -> Vec<i32> {
             // Infinite: copies around the base until off-screen both ways.
             let mut ks = vec![0i32];
             let step = w.max(1.0);
-            let right = ((GAME_W - x) / step).ceil() as i32;
+            let right = ((bound - x) / step).ceil() as i32;
             let left = (x / step).ceil() as i32;
             for k in 1..=right.min(64) {
                 ks.push(k);

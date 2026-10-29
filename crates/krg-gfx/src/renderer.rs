@@ -1,18 +1,20 @@
-//! The GLES 3.0 renderer: one shader, one VBO ring, one FBO, one blit.
+//! The GLES 3.0 renderer: one shader, one VBO ring, direct native-res draws.
 //!
 //! Frame shape (all GL calls happen on the GL thread that owns the context):
 //!
 //! ```text
-//! begin_scene()               bind FBO, viewport 320×240, clear, mvp=ortho(game)
+//! begin_scene()               bind default fb, viewport = full surface,
+//!                             clear, mvp = ortho(game space)
 //!   push_sprite(...) ×N       resolve texture (LRU), append quad to the ring
 //!   [flush() if the ring fills]      mid-frame safety valve
-//! present()                   flush → bind default fb → one letterboxed
-//!                             upscale quad → swap (the Java layer)
+//! present()                   flush → swap (the Java layer)
 //! ```
 //!
-//! The game never renders at phone resolution: the scene is authored at
-//! MUGEN's native pixel space in an FBO, and the only full-surface work is
-//! the single upscale draw.
+//! The game is authored in MUGEN pixel space (height locked to 240 units,
+//! width follows the screen aspect) but RASTERIZED AT DEVICE RESOLUTION:
+//! one scaling stage instead of the old 320×240 FBO + upscale blit, which
+//! blurred every sprite twice. Flat-color HUD quads and (NEAREST-sampled)
+//! sprites now land on exact device pixels — the "HD" path.
 
 use glow::HasContext;
 use krg_format::SpriteCache;
@@ -21,9 +23,13 @@ use crate::batch::{Batcher, Quad, BLENDS_ADD, BLENDS_ALPHA, MAX_QUADS};
 use crate::tex::{TexKey, TexLru};
 use crate::{nz, GfxError};
 
-/// Native MUGEN scene resolution (the classic localcoord).
-pub const GAME_W: i32 = 320;
+/// Game-space height — MUGEN's classic localcoord y. The width is
+/// aspect-driven (see [`Renderer::resize`]) so widescreen phones see MORE
+/// stage instead of a pillarboxed 4:3 slice.
 pub const GAME_H: i32 = 240;
+/// Game-space width bounds: 320 = classic 4:3, 640 covers 20:9 phones.
+pub const GAME_W_MIN: f32 = 320.0;
+pub const GAME_W_MAX: f32 = 640.0;
 
 /// Default GPU budget for sprite textures (48 MB — plenty for a stage + both
 /// fighters' visible frames; everything else streams).
@@ -73,12 +79,13 @@ pub struct Renderer {
     uni_mvp: Option<glow::UniformLocation>,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
-    fbo: glow::Framebuffer,
-    scene_tex: u32,
     white: u32,
     batch: Batcher,
     texlru: TexLru,
     surface: (i32, i32),
+    /// Game-space extents (gw × 240): gw = 240·aspect clamped to
+    /// [GAME_W_MIN, GAME_W_MAX]. The ortho maps this onto the full surface.
+    game_size: (f32, f32),
     stats: Stats,
 }
 
@@ -158,31 +165,10 @@ impl Renderer {
         gl.enable_vertex_attrib_array(2);
         gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 16);
 
-        // ── scene FBO at native game resolution ────────────────────────────
-        let scene_tex = create_scene_texture(&gl, GAME_W, GAME_H)?;
-        let fbo = gl
-            .create_framebuffer()
-            .map_err(GfxError::Gl)?;
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        gl.framebuffer_texture_2d(
-            glow::FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D,
-            nz(scene_tex),
-            0,
-        );
-        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-        if status != glow::FRAMEBUFFER_COMPLETE {
-            return Err(GfxError::Gl(format!(
-                "scene framebuffer incomplete: 0x{status:04X}"
-            )));
-        }
-        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-
         // ── shared 1×1 white texture (untextured quads / controller) ──────
         let white = gl
             .create_texture()
-            .map_err(GfxError::Gl)?;
+            .map_err(GfxError::Gl)?;;
         gl.bind_texture(glow::TEXTURE_2D, Some(white));
         gl.tex_image_2d(
             glow::TEXTURE_2D,
@@ -210,38 +196,52 @@ impl Renderer {
             uni_mvp,
             vao,
             vbo,
-            fbo,
-            scene_tex,
             white: white.0.get(),
             batch: Batcher::new(),
             texlru,
-            surface: (GAME_W, GAME_H),
+            surface: (GAME_H, GAME_H),
+            game_size: (320.0, GAME_H as f32),
             stats,
         })
     }
 
-    /// Surface size change (rotation, resize).
+    /// Surface size change (rotation, resize). Recomputes the game-space
+    /// width: **height stays locked at 240 MUGEN units** and the width
+    /// follows the physical aspect (clamped), so a 16:9/20:9 phone shows a
+    /// WIDER slice of the stage with zero letterboxing and zero stretching.
     pub fn resize(&mut self, w: i32, h: i32) {
         self.surface = (w.max(1), h.max(1));
+        let aspect = self.surface.0 as f32 / self.surface.1 as f32;
+        let gw = (GAME_H as f32 * aspect).clamp(GAME_W_MIN, GAME_W_MAX);
+        self.game_size = (gw, GAME_H as f32);
+    }
+
+    /// Current game-space extents (width, height) — the scene lays out
+    /// against this (centering, HUD anchors, stage anchoring).
+    pub fn game_extents(&self) -> (f32, f32) {
+        self.game_size
     }
 
     pub fn stats(&self) -> &Stats {
         &self.stats
     }
 
-    /// Begin the game scene: bind the FBO, clear, set the game-space MVP.
+    /// Begin the game scene: clear the default framebuffer and set the
+    /// game-space MVP (game units → full surface, rasterized at native res).
     pub fn begin_scene(&mut self) {
         let gl = &self.gl;
+        let (sw, sh) = self.surface;
+        let (gw, gh) = self.game_size;
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-            gl.viewport(0, 0, GAME_W, GAME_H);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.viewport(0, 0, sw, sh);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
             gl.use_program(Some(self.prog));
             gl.uniform_matrix_4_f32_slice(
                 self.uni_mvp.as_ref(),
                 false,
-                &ortho(GAME_W as f32, GAME_H as f32),
+                &ortho(gw, gh),
             );
             gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
         }
@@ -370,35 +370,9 @@ impl Renderer {
         }
     }
 
-    /// End the frame: flush the scene, then present it letterboxed to the
-    /// default framebuffer.
+    /// End the frame: flush the batch (already drawn at native resolution).
     pub fn present(&mut self) {
         self.flush();
-        let gl = &self.gl;
-        let (sw, sh) = self.surface;
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.viewport(0, 0, sw, sh);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.use_program(Some(self.prog));
-            gl.uniform_matrix_4_f32_slice(
-                self.uni_mvp.as_ref(),
-                false,
-                &ortho(sw as f32, sh as f32),
-            );
-            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            let (dx, dy, dw, dh) = letterbox(sw, sh, GAME_W, GAME_H);
-            let q = scene_blit_quad(dx, dy, dw, dh);
-            // Scene texture is sampled with its own (linear) filter.
-            if let Some(t) = nz(self.scene_tex) {
-                gl.bind_texture(glow::TEXTURE_2D, Some(t));
-            }
-            gl.bind_vertex_array(Some(self.vao));
-            let pushed = self.batch.push(self.scene_tex, BLENDS_ALPHA, &q);
-            debug_assert!(pushed);
-            self.flush();
-        }
         // stats
         self.stats.frames += 1;
         self.stats.textures = self.texlru.len() as u32;
@@ -423,16 +397,12 @@ impl Renderer {
         let gl = &self.gl;
         self.texlru.destroy_all(gl);
         unsafe {
-            if let Some(t) = nz(self.scene_tex) {
-                gl.delete_texture(t);
-            }
             if let Some(t) = nz(self.white) {
                 gl.delete_texture(t);
             }
             gl.delete_program(self.prog);
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);
-            gl.delete_framebuffer(self.fbo);
         }
     }
 }
@@ -446,69 +416,6 @@ fn ortho(w: f32, h: f32) -> [f32; 16] {
         0.0, 0.0, -1.0, 0.0,
         -1.0, 1.0, 0.0, 1.0,
     ]
-}
-
-/// The letterbox blit quad for `present()`.
-///
-/// **v is deliberately flipped.** The scene is rendered into the FBO with a
-/// y-down game-space ortho, so game-space top (y≈0) lands at window row
-/// `GAME_H-1` — texture v≈1 — and game-space bottom at v≈0. The present
-/// quad's top-left dst corner receives uv `(u0, v0)`, so v0 must be 1.0 to
-/// put game-top on screen-top. Without the flip every frame renders upside
-/// down (the v0.7 bug).
-fn scene_blit_quad(dx: f32, dy: f32, dw: f32, dh: f32) -> Quad {
-    Quad {
-        x: dx,
-        y: dy,
-        w: dw,
-        h: dh,
-        u0: 0.0,
-        v0: 1.0,
-        u1: 1.0,
-        v1: 0.0,
-        color: [255, 255, 255, 255],
-        angle: 0.0,
-        px: dx + dw / 2.0,
-        py: dy + dh / 2.0,
-    }
-}
-
-/// Largest `gw:gh`-aspect rect that fits into `sw:sh`, centered.
-pub fn letterbox(sw: i32, sh: i32, gw: i32, gh: i32) -> (f32, f32, f32, f32) {
-    let (sw, sh, gw, gh) = (sw as f32, sh as f32, gw as f32, gh as f32);
-    let scale = if sw / gw < sh / gh {
-        sw / gw
-    } else {
-        sh / gh
-    };
-    let (w, h) = (gw * scale, gh * scale);
-    ((sw - w) / 2.0, (sh - h) / 2.0, w, h)
-}
-
-/// Scene target texture — RGBA8, linear filter (the upscale itself), clamped.
-fn create_scene_texture(gl: &glow::Context, w: i32, h: i32) -> Result<u32, GfxError> {
-    unsafe {
-        let tex = gl
-            .create_texture()
-            .map_err(GfxError::Gl)?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            glow::RGBA8 as i32,
-            w,
-            h,
-            0,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(None),
-        );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-        Ok(tex.0.get())
-    }
 }
 
 #[cfg(test)]
@@ -525,27 +432,22 @@ mod tests {
         assert!((br.0 - 1.0).abs() < 1e-6 && (br.1 - (-1.0)).abs() < 1e-6);
     }
 
+    /// Game width follows the surface aspect (height locked at 240 units),
+    /// clamped to [320, 640]: a 16:9 phone sees a 426-wide stage slice, a
+    /// 20:9 phone 533 — never a pillarboxed 320, never unbounded.
     #[test]
-    fn scene_blit_flips_v_so_game_top_stays_on_screen_top() {
-        let q = scene_blit_quad(480.0, 0.0, 1440.0, 1080.0);
-        // dst top-left gets v0 — it must sample the FBO's v=1 row (game top).
-        assert_eq!((q.v0, q.v1), (1.0, 0.0));
-        // u is untouched (GL x is left-to-right both passes).
-        assert_eq!((q.u0, q.u1), (0.0, 1.0));
-        assert_eq!((q.x, q.y, q.w, q.h), (480.0, 0.0, 1440.0, 1080.0));
-    }
-
-    #[test]
-    fn letterbox_fits_and_centers() {
-        // 4:3 game on a 16:9 landscape phone → pillarboxed, full height.
-        let (x, y, w, h) = letterbox(2400, 1080, 320, 240);
-        assert_eq!((h, 1080.0), (1080.0, 1080.0));
-        assert!((w - 1440.0).abs() < 0.01); // 4:3 of 1080
-        assert_eq!((y, x), (0.0, (2400.0 - 1440.0) / 2.0));
-        // Portrait phone → letterboxed, full width.
-        let (x, y, w, h) = letterbox(1080, 2400, 320, 240);
-        assert_eq!((w, x), (1080.0, 0.0));
-        assert!((h - 810.0).abs() < 0.01);
-        assert_eq!(y, (2400.0 - 810.0) / 2.0);
+    fn game_width_follows_aspect_and_clamps() {
+        // pure function of (w, h) — replicate resize()'s math
+        let gw = |w: i32, h: i32| {
+            (GAME_H as f32 * (w as f32 / h as f32)).clamp(GAME_W_MIN, GAME_W_MAX)
+        };
+        // 4:3 → classic 320
+        assert!((gw(320, 240) - 320.0).abs() < 0.01);
+        // 16:9 landscape phone → 426.67
+        assert!((gw(1920, 1080) - 426.67).abs() < 0.1, "{}", gw(1920, 1080));
+        // 20:9 phone → 533.3
+        assert!((gw(2400, 1080) - 533.33).abs() < 0.1, "{}", gw(2400, 1080));
+        // ultrawide → clamped at 640
+        assert!((gw(3840, 1080) - 640.0).abs() < 0.01);
     }
 }

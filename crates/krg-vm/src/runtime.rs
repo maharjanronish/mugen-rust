@@ -1455,6 +1455,10 @@ pub struct Fight {
     /// verticalfollow (kfm.def default 0.2) + floortension
     pub cam_vfollow: f32,
     pub cam_floortension: f32,
+    /// Half the visible game width in game units (160 = classic 4:3).
+    /// The renderer reports the aspect-driven width each frame; pos_update
+    /// keeps chars inside the visible slice.
+    pub view_half_w: f32,
 }
 
 impl Fight {
@@ -1483,7 +1487,14 @@ impl Fight {
             cam_bound_high: -25.0,
             cam_vfollow: 0.2,
             cam_floortension: 0.0,
+            view_half_w: 160.0,
         }
+    }
+
+    /// Visible game-space width (320 = classic). Drives the screen-edge
+    /// clamp in pos_update — the renderer calls this when the aspect changes.
+    pub fn set_view_width(&mut self, w: f32) {
+        self.view_half_w = (w.max(240.0) / 2.0).min(320.0);
     }
 
     /// Stage camera parameters (StageDef [Camera] values, scaled to
@@ -1884,9 +1895,9 @@ impl Fight {
             }
         }
         // screen-edge push (char.go screenbound): chars stay within the
-        // camera view — 10px margin inside the 160px half-screen
-        let left = self.cam_x - 150.0;
-        let right = self.cam_x + 150.0;
+        // camera view — 10px margin inside the half-screen
+        let left = self.cam_x - (self.view_half_w - 10.0);
+        let right = self.cam_x + (self.view_half_w - 10.0);
         if c.pos[0] < left {
             c.pos[0] = left;
             if c.vel[0] < 0.0 {

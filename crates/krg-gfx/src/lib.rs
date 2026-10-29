@@ -33,7 +33,7 @@ pub mod tex;
 
 pub use batch::{Batcher, Quad, BLENDS_ADD, BLENDS_ALPHA};
 pub use lru::FrameLru;
-pub use renderer::{Renderer, GAME_H, GAME_W};
+pub use renderer::{Renderer, GAME_H, GAME_W_MAX, GAME_W_MIN};
 pub use tex::{TexKey, TexLru};
 
 /// Raw GL texture name → glow handle (0 stays `None`).
