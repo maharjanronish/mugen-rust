@@ -48,7 +48,7 @@ const GAME_H: f32 = 240.0;
 const MENU_ITEMS: [&str; 4] = ["ARCADE", "VS MODE", "TRAINING", "OPTIONS"];
 /// Version shown in the menu corner — keep in sync with
 /// android/app/build.gradle.kts `versionName`.
-const VERSION: &str = "0.9.0";
+const VERSION: &str = "0.9.4";
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const GRAY: [u8; 4] = [160, 160, 160, 255];

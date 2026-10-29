@@ -117,8 +117,24 @@ const DEFAULT_BTNS: [(u32, f32, f32); 6] = [
 
 /// Hit-test generosity: buttons are easier to hit than they look.
 const BTN_HIT_SCALE: f32 = 1.35;
-/// Pad deadzone as a fraction of the pad radius (component test).
+/// Pad direction ENGAGE threshold as a fraction of the pad radius
+/// (component test). Same value as the classic deadzone: a finger beyond
+/// 40% of the ring turns the direction on.
 const PAD_DEADZONE: f32 = 0.40;
+/// Pad direction RELEASE threshold — the hysteresis floor. A direction,
+/// once engaged, only drops when the finger falls back under 20% of the
+/// ring. Without this band, finger tremor at the deadzone boundary flips
+/// directions dozens of times per second — each flip is a fresh press edge
+/// in the MUGEN command buffer, so accidental `F,F` runs, `B,B` back-hops
+/// (the "character goes up"), jump-starts from up-flicker and constant
+/// crouch(10)↔stand(12) churn (the "janky laggy crouch"). A Schmitt
+/// trigger is what a real D-pad's rubber dome does mechanically.
+const PAD_RELEASE: f32 = 0.20;
+/// Pad capture generosity (hit-test radius as a multiple of the drawn
+/// ring). Users pushing a "joystick" naturally land the first touch on
+/// the far edge of the visible ring — at 1.10 the drag started dead and
+/// the character never moved ("can't move by dragging, tapping works").
+const PAD_HIT_SCALE: f32 = 1.40;
 
 /// User-editable radius bounds (normalized against the shorter side).
 pub const RADIUS_MIN: f32 = 0.025;
@@ -565,7 +581,7 @@ impl TouchController {
             }
         }
         if let Some(p) = self.layout.find(ZoneKind::Pad, 0) {
-            let hr = p.r * m * 1.10;
+            let hr = p.r * m * PAD_HIT_SCALE;
             if dist2(x, y, p.cx * w, p.cy * h) < hr * hr {
                 return Cap::Pad;
             }
@@ -582,17 +598,62 @@ impl TouchController {
                     None => return,
                 };
                 let (dx, dy) = (x - cx, y - cy);
-                let t = PAD_DEADZONE * r;
-                let mut d = 0u32;
-                if dx > t {
-                    d |= bits::PR;
-                } else if dx < -t {
-                    d |= bits::PL;
+                // Schmitt trigger per axis: engage beyond PAD_DEADZONE*r,
+                // release only under PAD_RELEASE*r. Seeding from the
+                // current bits keeps a direction alive through the hold
+                // band — see PAD_RELEASE for why this matters so much.
+                let engage = PAD_DEADZONE * r;
+                let release = PAD_RELEASE * r;
+                let mut d = self.raw_dirs;
+                // x axis: PL ↔ PR
+                match d & (bits::PL | bits::PR) {
+                    0 => {
+                        if dx > engage {
+                            d |= bits::PR;
+                        } else if dx < -engage {
+                            d |= bits::PL;
+                        }
+                    }
+                    b if b == bits::PR => {
+                        if dx < -engage {
+                            d = (d & !bits::PR) | bits::PL; // hard side switch
+                        } else if dx < release {
+                            d &= !bits::PR;
+                        }
+                    }
+                    _ => {
+                        // PL held
+                        if dx > engage {
+                            d = (d & !bits::PL) | bits::PR;
+                        } else if dx > -release {
+                            d &= !bits::PL;
+                        }
+                    }
                 }
-                if dy < -t {
-                    d |= bits::PU;
-                } else if dy > t {
-                    d |= bits::PD;
+                // y axis: PU ↔ PD (screen y grows downward)
+                match d & (bits::PU | bits::PD) {
+                    0 => {
+                        if dy < -engage {
+                            d |= bits::PU;
+                        } else if dy > engage {
+                            d |= bits::PD;
+                        }
+                    }
+                    b if b == bits::PU => {
+                        if dy > engage {
+                            d = (d & !bits::PU) | bits::PD;
+                        } else if dy > -release {
+                            d &= !bits::PU;
+                        }
+                    }
+                    _ => {
+                        // PD held
+                        if dy < -engage {
+                            d = (d & !bits::PD) | bits::PU;
+                        } else if dy < release {
+                            d &= !bits::PD;
+                        }
+                    }
                 }
                 self.raw_dirs = d;
             }
@@ -786,6 +847,127 @@ mod tests {
         let mut c = TouchController::new();
         let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
         c.touch(1, TouchPhase::Down, px + 10.0, py + 5.0, SW, SH);
+        assert_eq!(c.tick(), 0);
+    }
+
+    // ── hysteresis + capture (the v0.9.3 device bugs) ──────────────────────
+
+    /// Pad ring radius on the reference screen.
+    fn pad_r() -> f32 {
+        DEFAULT_PAD.2 * SW.min(SH)
+    }
+
+    /// Finger tremor around the engage boundary must NOT flip the direction:
+    /// once engaged, it survives the whole hold band (0.20r..0.40r). Every
+    /// flip would be a fresh press edge in the MUGEN command buffer — the
+    /// accidental F,F runs / B,B hops / crouch churn on the device.
+    #[test]
+    fn pad_hysteresis_hold_band() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        // engage right…
+        c.touch(1, TouchPhase::Down, px + 0.60 * r, py, SW, SH);
+        assert_eq!(c.tick(), PR);
+        // …then tremble between 0.22r and 0.38r for a long while
+        for i in 0..200 {
+            let wobble = 0.30 + 0.08 * ((i % 5) as f32 - 2.0) / 2.0;
+            c.touch(1, TouchPhase::Move, px + wobble * r, py, SW, SH);
+            assert_eq!(c.tick(), PR, "PR dropped at wobble {wobble}r (i={i})");
+        }
+        // …and only releasing under 0.20r drops it
+        c.touch(1, TouchPhase::Move, px + 0.15 * r, py, SW, SH);
+        assert_eq!(c.tick(), 0);
+    }
+
+    /// A fresh press inside the hold band engages nothing (no stale state).
+    #[test]
+    fn pad_hysteresis_cold_press_in_band() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        c.touch(1, TouchPhase::Down, px + 0.30 * r, py, SW, SH);
+        assert_eq!(c.tick(), 0);
+        // crossing the release line downward from nothing still nothing
+        c.touch(1, TouchPhase::Move, px + 0.10 * r, py, SW, SH);
+        assert_eq!(c.tick(), 0);
+    }
+
+    /// Fast side switches pass through in ONE event (no dead gap that would
+    /// eat quarter-circle motions).
+    #[test]
+    fn pad_hard_side_switch() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        c.touch(1, TouchPhase::Down, px + 0.80 * r, py, SW, SH);
+        assert_eq!(c.tick(), PR);
+        // sweep straight across to the far side
+        c.touch(1, TouchPhase::Move, px - 0.80 * r, py, SW, SH);
+        assert_eq!(c.tick(), PL);
+        // and back
+        c.touch(1, TouchPhase::Move, px + 0.80 * r, py, SW, SH);
+        assert_eq!(c.tick(), PR);
+    }
+
+    /// Diagonals survive per-axis hysteresis: DF stays DF while the finger
+    /// wobbles on one axis inside the hold band.
+    #[test]
+    fn pad_diagonal_hysteresis() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        c.touch(1, TouchPhase::Down, px + 0.70 * r, py + 0.70 * r, SW, SH);
+        assert_eq!(c.tick(), PR | PD);
+        // x trembles in the hold band, y solid → still DF
+        for i in 0..50 {
+            let wobble = 0.30 + 0.06 * (i % 3) as f32 / 3.0;
+            c.touch(1, TouchPhase::Move, px + wobble * r, py + 0.70 * r, SW, SH);
+            assert_eq!(c.tick(), PR | PD, "DF lost at x wobble {wobble}r");
+        }
+        // x collapses under the release line → plain D
+        c.touch(1, TouchPhase::Move, px + 0.10 * r, py + 0.70 * r, SW, SH);
+        assert_eq!(c.tick(), PD);
+    }
+
+    /// A drag that STARTS on the visible ring's edge (or a touch past it)
+    /// must capture the pad — the old 1.10× capture circle left such drags
+    /// dead ("can't move by dragging" on the device).
+    #[test]
+    fn pad_edge_start_drag_captures() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        // down at 1.25r right of center — outside the drawn ring
+        c.touch(1, TouchPhase::Down, px + 1.25 * r, py, SW, SH);
+        assert_eq!(c.tick(), PR, "edge-start drag is a dead touch");
+        // keep dragging further out — still captured (pointer owns the pad)
+        c.touch(1, TouchPhase::Move, px + 2.5 * r, py, SW, SH);
+        assert_eq!(c.tick(), PR);
+        // down at 1.39r (just inside the capture circle) — also captures
+        let mut c2 = TouchController::new();
+        c2.touch(1, TouchPhase::Down, px + 1.39 * r, py, SW, SH);
+        assert_eq!(c2.tick(), PR);
+        // a touch clearly beyond the capture generosity still misses
+        let mut c3 = TouchController::new();
+        c3.touch(1, TouchPhase::Down, px + 2.0 * r, py, SW, SH);
+        assert_eq!(c3.tick(), 0);
+    }
+
+    /// Finger up clears every direction instantly (no hysteresis lag on
+    /// release — MUGEN hold commands must drop the moment the pad lets go).
+    #[test]
+    fn pad_up_clears_instantly() {
+        let mut c = TouchController::new();
+        let (px, py) = (DEFAULT_PAD.0 * SW, DEFAULT_PAD.1 * SH);
+        let r = pad_r();
+        c.touch(1, TouchPhase::Down, px + 0.70 * r, py + 0.70 * r, SW, SH);
+        assert_eq!(c.tick(), PR | PD);
+        // lift while still deep in the hold zone
+        c.touch(1, TouchPhase::Up, px + 0.70 * r, py + 0.70 * r, SW, SH);
+        assert_eq!(c.tick(), 0);
+        // re-press in the hold band: nothing stale survives the lift
+        c.touch(1, TouchPhase::Down, px + 0.30 * r, py + 0.30 * r, SW, SH);
         assert_eq!(c.tick(), 0);
     }
 
