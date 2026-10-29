@@ -384,25 +384,44 @@ impl Scene {
                 } else {
                     self.start_hold_ms = 0.0;
                 }
-                // step the live runtime at 60Hz with the touch bits
-                if let Some(fr) = self.fight.as_mut() {
-                    fr.tick_acc += dt.min(100.0);
-                    const MS: f64 = 1000.0 / 60.0;
-                    let mut ticks = 0;
-                    while fr.tick_acc >= MS && ticks < 4 {
-                        fr.tick_acc -= MS;
-                        // P2 CPU: AiInput jam feeds raw input bits
-                        let intro = fr.fight.round_state < 2;
-                        fr.ai.update(intro, fr.ai_level, &mut fr.ai_rng);
-                        let b = fr.ai.buttons();
-                        let mut p2 = 0u32;
-                        for (i, on) in b.iter().enumerate() {
-                            if *on {
-                                p2 |= 1 << i;
-                            }
+                // match over → TAP A (or X/Y/Z/C) for a rematch; the fight
+                // stops stepping so the K.O. pose freeze-frames under the
+                // prompt. This was the missing "what happens after the last
+                // round" the device test hit.
+                let match_over = self
+                    .fight
+                    .as_ref()
+                    .is_some_and(|fr| fr.fight.finished);
+                if match_over {
+                    // any attack button restarts the match
+                    if pressed & (bits::A | bits::B | bits::C | bits::X | bits::Y | bits::Z) != 0 {
+                        if let Some(fr) = self.fight.as_mut() {
+                            fr.fight.restart_match();
+                            fr.tick_acc = 0.0;
+                            log::info!("fight: rematch");
                         }
-                        fr.fight.step_bits(held, p2);
-                        ticks += 1;
+                    }
+                } else {
+                    // step the live runtime at 60Hz with the touch bits
+                    if let Some(fr) = self.fight.as_mut() {
+                        fr.tick_acc += dt.min(100.0);
+                        const MS: f64 = 1000.0 / 60.0;
+                        let mut ticks = 0;
+                        while fr.tick_acc >= MS && ticks < 4 {
+                            fr.tick_acc -= MS;
+                            // P2 CPU: AiInput jam feeds raw input bits
+                            let intro = fr.fight.round_state < 2;
+                            fr.ai.update(intro, fr.ai_level, &mut fr.ai_rng);
+                            let b = fr.ai.buttons();
+                            let mut p2 = 0u32;
+                            for (i, on) in b.iter().enumerate() {
+                                if *on {
+                                    p2 |= 1 << i;
+                                }
+                            }
+                            fr.fight.step_bits(held, p2);
+                            ticks += 1;
+                        }
                     }
                 }
                 self.draw_fight(r);
@@ -597,7 +616,24 @@ impl Scene {
             let _ = fill_x;
         }
 
-        // timer (MM:SS from ticks)
+        // rounds-won markers under each life bar (a small square per win)
+        for (side, wins) in [(0usize, snap.wins[0]), (1usize, snap.wins[1])] {
+            for k in 0..wins.max(0) {
+                let x = if side == 0 {
+                    5.0 + k as f32 * 8.0
+                } else {
+                    self.game_w - 5.0 - (k + 1) as f32 * 8.0
+                };
+                let q = Quad {
+                    x, y: BAR_Y + BAR_H + 3.0, w: 5.0, h: 5.0,
+                    u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0,
+                    color: YELLOW, angle: 0.0, px: 0.0, py: 0.0,
+                };
+                r.push(0, &q);
+            }
+        }
+
+        // timer (MM:SS from ticks) + round / KO / match-over texts
         let texts: Vec<(String, f32, f32, f32, [u8; 4])> = {
             let Some(fr) = self.font.as_ref() else {
                 return;
@@ -608,14 +644,33 @@ impl Scene {
             let w = fr.metrics.text_width(&txt) as f32;
             out.push((txt, (self.game_w - w) / 2.0, BAR_Y - 2.0, 1.0, WHITE));
             if snap.round_state < 2 {
-                let msg = if snap.round_state == 0 { "GET READY" } else { "ROUND 1" };
-                let w = fr.metrics.text_width(msg) as f32;
-                out.push((msg.into(), (self.game_w - w) / 2.0, GAME_H / 2.0 - 20.0, 1.0, YELLOW));
+                let msg = if snap.round_state == 0 {
+                    "GET READY".to_string()
+                } else {
+                    // dynamic round number — was hardcoded "ROUND 1",
+                    // so rounds 2/3 announced wrong
+                    format!("ROUND {}", snap.round_no)
+                };
+                let w = fr.metrics.text_width(&msg) as f32;
+                out.push((msg, (self.game_w - w) / 2.0, GAME_H / 2.0 - 20.0, 1.0, YELLOW));
             }
             if snap.round_state >= 3 {
                 let msg = "K.O.";
                 let w = fr.metrics.text_width(msg) as f32;
                 out.push((msg.into(), (self.game_w - w) / 2.0, GAME_H / 2.0 - 20.0, 2.0, red));
+            }
+            // match over — the rematch prompt (fight finished flag)
+            if snap.finished {
+                let line1 = "MATCH OVER";
+                let line2 = "TAP A: REMATCH";
+                let line3 = "HOLD START: MENU";
+                let w1 = fr.metrics.text_width(line1) as f32;
+                let w2 = fr.metrics.text_width(line2) as f32;
+                let w3 = fr.metrics.text_width(line3) as f32;
+                let cy = GAME_H / 2.0 - 12.0;
+                out.push((line1.into(), (self.game_w - w1) / 2.0, cy, 2.0, YELLOW));
+                out.push((line2.into(), (self.game_w - w2) / 2.0, cy + 24.0, 1.0, WHITE));
+                out.push((line3.into(), (self.game_w - w3) / 2.0, cy + 38.0, 1.0, GRAY));
             }
             out
         };

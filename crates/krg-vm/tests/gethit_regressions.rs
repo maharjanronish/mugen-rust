@@ -238,3 +238,54 @@ fn repeated_air_hits_stay_in_bounds() {
         assert!(y0 > -400.0, "P1 escaped through the ceiling (y={y0})");
     }
 }
+
+/// The round machine: KO → round_state 3 → next round starts (life refilled,
+/// positions reset, power kept); match ends at max_wins; restart_match()
+/// brings everything back (the "no way to restart after the last round" bug).
+#[test]
+fn round_machine_restarts_and_match_remakes() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    skip_intro(&mut fight);
+
+    // drain P2's life with sustained pressure until a round ends
+    let mut round2_seen = false;
+    let mut match_over_tick = None;
+    for t in 0..3600 {
+        let mut i1 = none();
+        i1[3] = true;
+        i1[8] = (t % 18) < 9;
+        fight.step(&[i1, none()]);
+        if fight.round_no >= 2 {
+            round2_seen = true;
+        }
+        if fight.finished {
+            match_over_tick = Some(t);
+            break;
+        }
+    }
+    assert!(round2_seen, "never reached round 2 — round restart broken");
+    assert!(match_over_tick.is_some(), "match never finished");
+
+    // snapshot carries the end state
+    let snap = fight.snapshot();
+    assert!(snap.finished);
+    assert!(snap.wins[0] >= fight.max_wins || snap.wins[1] >= fight.max_wins);
+
+    // rematch: full reset
+    fight.restart_match();
+    let snap = fight.snapshot();
+    assert!(!snap.finished, "restart_match left finished=true");
+    assert_eq!(snap.round_no, 1);
+    assert_eq!(snap.wins, [0, 2].map(|_| 0), "wins not cleared");
+    assert_eq!(fight.chars[0].life, fight.chars[0].life_max);
+    assert_eq!(fight.chars[1].life, fight.chars[1].life_max);
+    assert_eq!(fight.chars[0].power, 0, "power should reset on rematch");
+
+    // and the rematch is playable: intro completes into round_state 2
+    for _ in 0..80 {
+        fight.step(&[none(), none()]);
+    }
+    assert_eq!(fight.round_state, 2, "rematch did not restart cleanly");
+    assert!(fight.chars[0].ctrl, "rematch P1 has no ctrl after intro");
+}
