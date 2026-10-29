@@ -200,6 +200,10 @@ cargo run --release -p krg-sfftool -- path/to/char.air
 | CNS/CMD state compiler + bytecode VM | ✅ v0.9 | kfm.cns/kfm.cmd/common1.cns.zss compile from the real v1.0.0 release |
 | Command system (input.go port) | ✅ v0.9 | SOCD/assist/charge/>/\$/\* syntax, buffer timers, .cmd compiler |
 | Char runtime: states, physics, hit detection, rounds, camera | ✅ v0.9 | KFM walks/crouches/jumps/punches; clsn hits, gethit, KO, next round, P2 CPU |
+| Gethit chain + fall/tech/getup (char.go 12581 port) | ✅ v0.9.1 | hitshaketime/hittime tick down, fall → liedown → getup → 0; air hits tumble with yaccel 0.35 gravity |
+| ZSS function calls (`call IkSys_*`) | ✅ v0.9.1 | were a silent no-op stub; ret slots fixed; same-number changeAnim keeps progress (Ikemen object semantics) |
+| Guard / blocking (char.go 11429 + 11650 port) | ✅ v0.9.1 | guardflag gate, chip damage, guard states 150-155, guard.* fallback chain (guard.velocity ← ground.velocity) |
+| Match restart (rematch) | ✅ v0.9.1 | Fight::restart_match + MATCH OVER → TAP A: REMATCH scene flow |
 | Sound, netplay | ⏳ roadmap | audio bridge is the next big one |
 
 ## Roadmap
