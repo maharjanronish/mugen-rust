@@ -201,6 +201,12 @@ pub struct GetHitVar {
     pub fall_xvel: f32,
     pub fall_yvel: f32,
     pub fall: bool,
+    /// ticks spent falling (char.go fall_time — steps even during hitshake)
+    pub fall_time: i32,
+    /// HitDef fall.recover: tech recovery allowed (canRecover gate)
+    pub fall_recover: bool,
+    /// HitDef fall.recovertime: ticks before tech recovery unlocks
+    pub fall_recovertime: i32,
     pub falltime: i32,
     pub guarded: bool,
     pub isbound: bool,
@@ -306,6 +312,8 @@ const ASF_NOCROUCH: u64 = 1 << 21;
 const ASF_NOJUMP: u64 = 1 << 38;
 const ASF_NOAUTOTURN: u64 = 1 << 2;
 const ASF_NOBRAKE: u64 = 1 << 18;
+/// sctrl::asf::NOGETUPFROMLIEDOWN — AssertSpecial gate on the 5110→5120 getup
+const ASF_NOGETUPFROMLIEDOWN: u64 = 1 << 29;
 
 impl CharState {
     pub fn new(
@@ -352,7 +360,11 @@ impl CharState {
             maps: HashMap::new(),
             hitpause_time: 0,
             hitdef: None,
-            ghv: GetHitVar::default(),
+            ghv: GetHitVar {
+                // char.go:1209 — fresh GetHitVar parks hittime at -1 (hitOver)
+                hittime: -1,
+                ..GetHitVar::default()
+            },
             hitdef_attr_st: 0,
             hitdef_attr_kind: 0,
             hit_count: 0,
@@ -595,7 +607,8 @@ impl Ctx for CharState {
             UniqHitCount => v_int(self.uniq_hit_count),
             HitPauseTime => v_int(self.hitpause_time),
             HitShakeOver => v_bool(self.ghv.hitshaketime <= 0),
-            HitOver => v_bool(self.ghv.hittime <= 0),
+            // char.go:5829 — hitOver is hittime < 0 (hittime parks at -1)
+            HitOver => v_bool(self.ghv.hittime < 0),
             HitFall => v_bool(self.ghv.fall),
             HitDefAttr => v_string(self.hitdef_attr_string()),
             HitVelX => v_float(self.ghv.xvel),
@@ -619,7 +632,10 @@ impl Ctx for CharState {
             IkemenVersion => v_int(0),
             IkemenVersionMinor => v_int(99),
             InGuardDist => v_bool(self.inguarddist),
-            CanRecover => v_bool(!self.ghv.fall || self.ghv.yaccel == 0.0),
+            // char.go:5655 — canRecover = fall.recover && fall_time >=
+            // fall.recovertime. The old `!fall || yaccel == 0` placeholder
+            // never gated tech recovery at all.
+            CanRecover => v_bool(self.ghv.fall_recover && self.ghv.fall_time >= self.ghv.fall_recovertime),
             AnimLoopCount => v_int(self.anim.loopcount),
             RoundsExisted => v_int(self.rounds_existed_cache),
             MatchOver => v_bool(self.match_over_cache),
@@ -670,7 +686,7 @@ impl Ctx for CharState {
             FallEnvShakeAmpl => v_int(0),
             FallEnvShakePhase => v_float(90.0),
             Fall => v_bool(g.fall),
-            FallTime => v_int(g.falltime),
+            FallTime => v_int(g.fall_time),
             Guarded => v_bool(g.guarded),
             IsBound => v_bool(g.isbound),
             AnimType2 => v_int(g.animtype),
@@ -1039,6 +1055,11 @@ impl StateHost for CharState {
             .get(name_idx)
             .cloned()
             .unwrap_or_default();
+        // ZSS function names are case-insensitive (the whole file is
+        // tokenized lowercased in Ikemen) — normalize before lookup or
+        // `call IkSys_GetHitKnockedBack(...)` never finds the compiled
+        // `[Function IkSys_GetHitKnockedBack(...)]` and silently no-ops.
+        let name = name.to_lowercase();
         if let Some(fb) = self.gi.funcs.get(&name).cloned() {
             // fresh local frame: args then ret slots
             let saved = std::mem::take(&mut self.locals);
@@ -1046,12 +1067,13 @@ impl StateHost for CharState {
             for (i, a) in args.iter().take(fb.num_args).enumerate() {
                 self.set_local(i as u8, *a);
             }
-            // run body nodes
-            let mut blk = crate::statedef::StateBlock {
-                ctrls: fb.body.clone(),
-                ..Default::default()
-            };
-            let _ = run_state_bytecode_nodes(&mut blk, self);
+            // run body nodes with a fresh persistent-counter frame — the
+            // body's gated if-blocks carry persistent indexes (the parser's
+            // ordinal counter); an empty slice made every one of them fail
+            // the ps bounds check and silently skip (the gethit chain was
+            // the casualty: hitVelSet / the hitOver changeState never ran).
+            let mut ps: Vec<i32> = vec![0; fb.num_ctrlsps];
+            let _ = run_state_bytecode_nodes(&fb.body, &mut ps, self);
             // collect rets
             for i in 0..fb.num_rets {
                 rets.push(self.locals.get(fb.num_args + i).copied().unwrap_or_else(v_none));
@@ -1068,10 +1090,24 @@ impl StateHost for CharState {
     fn on_state_change(&mut self) {}
 }
 
-fn run_state_bytecode_nodes(blk: &mut crate::statedef::StateBlock, host: &mut dyn StateHost) -> bool {
-    // run ctrls directly (skipping block persistent/trigger — the function
-    // body's own blocks still run via Node::Block)
-    let _ = blk;
+fn run_state_bytecode_nodes(
+    nodes: &[crate::statedef::Node],
+    ps: &mut [i32],
+    host: &mut CharState,
+) -> bool {
+    // Run a ZSS function body's nodes. THE stuck-bug fix: this was a
+    // no-op stub, so every `call IkSys_*` in common1.cns.zss (the entire
+    // gethit recovery chain: hitVelSet knockback, the hitOver changeState
+    // back to 0, the liedown/getup anims...) silently did nothing and
+    // get-hit victims never left states 5000/5001 — frozen in place with
+    // zero velocity, i.e. exactly the reported "hit them and they get
+    // stuck". `ps` carries the body's persistent slots (fresh per call —
+    // common1 functions don't rely on cross-call persistence).
+    for n in nodes {
+        if run_node_with_ps(n, host, ps, false) {
+            return true;
+        }
+    }
     false
 }
 
@@ -1647,6 +1683,7 @@ impl Fight {
             self.action_prepare(i);
             self.auto_turn(i);
             self.action_run(i);
+            self.gethit_tick(i);
             self.pos_update(i);
             // anim advance + timers
             let anim_no = self.chars[i].anim.anim_no;
@@ -1725,23 +1762,73 @@ impl Fight {
         self.cam_y = 0.0;
         let starts = [(self.chars[0].start_pos, 1), (self.chars[1].start_pos, -1)];
         for (i, (x, face)) in starts.iter().enumerate() {
-            let c = &mut self.chars[i];
-            c.pos = [*x, 0.0, 0.0];
-            c.vel = [0.0, 0.0, 0.0];
-            c.facing = *face;
-            c.life = c.life_max;
-            c.alive = true;
-            c.ctrl = false;
-            c.hitpause_time = 0;
-            c.hitdef = None;
-            c.hitdef_targets.clear();
-            c.move_type = MoveTypeT::I;
-            c.pending_state = None;
-            c.time_in_state = 0;
-            c.cmd_list.buf_reset();
-            c.set_anim(0);
-            c.change_state(0);
+            self.reset_char_round(i, *x, *face);
         }
+    }
+
+    /// Round-reset one fighter: position/life/state/anim back to defaults.
+    /// Power and vars persist across rounds (system.go keeps them).
+    fn reset_char_round(&mut self, i: usize, x: f32, face: i32) {
+        let liedown_time = self.chars[i].gi.data.liedown_time;
+        let c = &mut self.chars[i];
+        c.pos = [x, 0.0, 0.0];
+        c.vel = [0.0, 0.0, 0.0];
+        c.facing = face;
+        c.life = c.life_max;
+        c.alive = true;
+        c.ctrl = false;
+        c.hitpause_time = 0;
+        c.hitdef = None;
+        c.hitdef_targets.clear();
+        c.move_type = MoveTypeT::I;
+        c.state_type = StateTypeT::S;
+        c.physics = StateTypeT::S;
+        c.pending_state = None;
+        c.time_in_state = 0;
+        c.ps.clear();
+        c.asf = 0;
+        c.no_push = false;
+        c.hit_count = 0;
+        c.uniq_hit_count = 0;
+        // gethit vars fully re-armed (a KO'd char carries a dead ghv)
+        c.ghv = GetHitVar {
+            hittime: -1,
+            down_recovertime: liedown_time,
+            ..GetHitVar::default()
+        };
+        c.cmd_list.buf_reset();
+        c.set_anim(0);
+        c.change_state(0);
+    }
+
+    /// Restart the whole match from scratch (the missing "play again" the
+    /// device test hit at match end): wins/round/timer reset and BOTH
+    /// fighters fully re-initialized — deeper than a round reset because
+    /// power, vars and the negative-state persistents start from zero too.
+    pub fn restart_match(&mut self) {
+        self.wins = [0; 2];
+        self.round_no = 1;
+        self.finished = false;
+        self.frame_count = 0;
+        self.over_timer = 0;
+        self.env_shake = (0, 0, 60.0, 0.0);
+        let starts = [(self.chars[0].start_pos, 1), (self.chars[1].start_pos, -1)];
+        for (i, (x, face)) in starts.iter().enumerate() {
+            self.reset_char_round(i, *x, *face);
+            // match reset: power + vars + neg-state persistents too
+            let c = &mut self.chars[i];
+            c.power = 0;
+            c.vars = [0; 64];
+            c.fvars = [0.0; 64];
+            c.sysvars = [0; 8];
+            c.sysfvars = [0.0; 8];
+            c.neg_ps = Default::default();
+            c.attack_mul = 1.0;
+            c.defence_mul = 1.0;
+        }
+        self.intro_time = 60;
+        self.round_state = 0;
+        self.cur_round_time = self.match_time;
     }
 
     /// Engine auto-turn (char.go): with ctrl on the ground, the char faces
@@ -1857,6 +1944,60 @@ impl Fight {
         }
 
         // a state run may have queued another change — apply next frame
+    }
+
+    /// Per-tick gethit maintenance (char.go:12581-12640, actionRun tail).
+    ///
+    /// THE stuck-bug fix: ghv.hitshaketime / ghv.hittime were set on hit but
+    /// never counted down, so hitShakeOver / hitOver never fired and the
+    /// common1 gethit chain (5000 → 5001 → 0, or the air/fall chain) never
+    /// exited — the victim stood/floated in the gethit state forever.
+    /// Go decrements them every tick the char is NOT hit-paused:
+    ///
+    /// * while in movetype H: hitshaketime--, and (once the shake is over)
+    ///   hittime-- down to -1 where hitOver is true; fall_time++ steps even
+    ///   during the shake (it gates canRecover)
+    /// * once out of movetype H (recovered/getting up): clear the shake and
+    ///   the fall flags, re-arm down_recovertime from liedown.time
+    /// * state 5110 (liedown) counts down_recovertime and gets up to 5120
+    ///   (char.go:12512 — time >= 1, recovery expired, alive, flag allows)
+    fn gethit_tick(&mut self, i: usize) {
+        // getup decision first (Go checks it before the countdowns move)
+        let getup = {
+            let c = &self.chars[i];
+            c.state_no == 5110
+                && c.time_in_state >= 1
+                && c.ghv.down_recovertime <= 0
+                && c.alive
+                && (c.asf & ASF_NOGETUPFROMLIEDOWN) == 0
+        };
+        if getup {
+            self.chars[i].change_state(5120);
+        }
+        let liedown_time = self.chars[i].gi.data.liedown_time;
+        let c = &mut self.chars[i];
+        if c.move_type == MoveTypeT::H {
+            if c.ghv.hitshaketime > 0 {
+                c.ghv.hitshaketime -= 1;
+            }
+            // char.go:12587 — fall_time steps even during hitshake
+            if c.ghv.fall {
+                c.ghv.fall_time += 1;
+            }
+        } else {
+            // recovered (char.go:12599-12620): clear shake + fall latches
+            c.ghv.hitshaketime = 0;
+            c.ghv.fall = false;
+            c.ghv.fallcount = 0;
+            c.ghv.down_recovertime = liedown_time;
+        }
+        if c.ghv.hitshaketime <= 0 && c.ghv.hittime >= 0 {
+            c.ghv.hittime -= 1;
+        }
+        // char.go:12637 — the liedown countdown
+        if c.ghv.down_recovertime > 0 && c.state_no == 5110 {
+            c.ghv.down_recovertime -= 1;
+        }
     }
 
     /// posUpdate (char.go:10076) + landing (12521)
@@ -2118,23 +2259,58 @@ impl Fight {
                 d.life = if hd.kill.unwrap_or(true) { 0 } else { 1 };
             }
             d.alive = d.life > 0;
-            // gethit vars
+            // ── gethit vars (char.go:11673-11749) ──────────────────────────
+            // Velocities are stored in the VICTIM's facing frame: xvel gets
+            // flipped by the attacker's facing (-byf). The old code stored
+            // the raw HitDef value, which in our pos_update (vel * facing)
+            // knocked the victim INTO the attacker instead of away.
+            let airborne = d.state_type == StateTypeT::A;
+            let byf = -(attacker_facing as f32);
             d.ghv.damage = dmg;
-            d.ghv.xvel = hd.ground_velocity[0];
-            d.ghv.yvel = hd.ground_velocity[1];
+            d.ghv.xvel = if airborne {
+                hd.air_velocity[0] * byf
+            } else {
+                hd.ground_velocity[0] * byf
+            };
+            d.ghv.yvel = if airborne {
+                hd.air_velocity[1]
+            } else {
+                hd.ground_velocity[1]
+            };
+            d.ghv.yaccel = hd.yaccel;
+            // hittime (char.go:11702-11746): air → air.hittime; ground with
+            // a y-component (launcher) → air.hittime; plain ground →
+            // ground.hittime
+            d.ghv.hittime = if airborne || d.ghv.yvel != 0.0 {
+                hd.air_hittime.max(0)
+            } else {
+                hd.ground_hittime.max(0)
+            };
             d.ghv.hitshaketime = hd.pausetime[1].max(0);
-            d.ghv.hittime = hd.ground_hittime.max(0);
-            d.ghv.fall = hd.fall;
+            d.ghv.slidetime = hd.ground_slidetime.max(0);
+            // fall flags (char.go:11739/11752): air hits fall by default
+            // (air.fall unset → IErr ≠ 0 → true in Go), ground hits use fall
+            d.ghv.fall = d.ghv.fall || if airborne { hd.air_fall } else { hd.fall };
+            d.ghv.fall_recover = hd.fall_recover < 0 || hd.fall_recover > 0;
+            d.ghv.fall_recovertime = hd.fall_recovertime.max(0);
+            // char.go:14291 — down.recovertime < 0 → [Data] liedown.time
+            d.ghv.down_recovertime = if hd.down_recovertime < 0 {
+                d.gi.data.liedown_time
+            } else {
+                hd.down_recovertime
+            };
             d.ghv.id = attacker_id;
-            d.hitpause_time = hd.pausetime[0].max(0) + 1;
+            // hitpause (char.go:14301/14306): the defender freezes for
+            // pausetime[1] (the shake), the attacker for pausetime[0].
+            // The old code used pausetime[0]+1 for BOTH — wrong for every
+            // char whose two values differ, and one tick long for the rest.
+            d.hitpause_time = hd.pausetime[1].max(0);
             d.hit_count += 1;
             d.hitdef_attr_st = 0; // clear own hitdef attr on gethit
-            // velocity + facing + state change
-            d.vel[0] = hd.ground_velocity[0];
-            if d.state_type == StateTypeT::A {
-                d.vel[0] = hd.air_velocity[0];
-                d.vel[1] = hd.air_velocity[1];
-            }
+            // Knockback velocity is applied by the gethit states via
+            // hitVelSet from ghv (IkSys_GetHitKnockedBack) — NOT directly
+            // here. The old direct vel[] write fought the statedef velset
+            // and pushed the victim the wrong way for one visible frame.
             if hd.p2facing != 0 {
                 d.facing = if hd.p2facing < 0 {
                     -attacker_facing
@@ -2153,7 +2329,7 @@ impl Fight {
             d.change_state(gs);
             // attacker pause + counters
             let a2 = &mut self.chars[ai];
-            a2.hitpause_time = hd.pausetime[0].max(0) + 1;
+            a2.hitpause_time = hd.pausetime[0].max(0);
             a2.uniq_hit_count += 1;
         }
     }
@@ -2458,6 +2634,10 @@ pub struct FightSnapshot {
     /// Camera scroll (stage space): draw world at (pos - cam)
     pub cam_x: f32,
     pub cam_y: f32,
+    /// Match is over (someone reached max_wins) — the scene offers a rematch
+    pub finished: bool,
+    /// Rounds won per side (drives the MATCH OVER screen / win markers)
+    pub wins: [i32; 2],
 }
 
 impl Fight {
@@ -2534,6 +2714,8 @@ impl Fight {
             time_left: self.cur_round_time / 60,
             cam_x: self.cam_x,
             cam_y: self.cam_y,
+            finished: self.finished,
+            wins: self.wins,
         }
     }
 }

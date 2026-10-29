@@ -36,6 +36,10 @@ pub struct FuncBytecode {
     pub num_vars: i32,
     pub num_args: usize,
     pub num_rets: usize,
+    /// persistent-counter slots the body's gated blocks need (the parser's
+    /// ordinal counter) — without them every `if`-block in a function body
+    /// fails the ps bounds check and silently skips.
+    pub num_ctrlsps: usize,
     pub body: Vec<Node>,
 }
 
@@ -1029,16 +1033,21 @@ pub fn compile_zss_text(
                         ordinal: 0,
                     };
                     let body = p.parse_nodes(false)?;
+                    let num_vars = p.sc.locals.len() as i32;
                     let fb = FuncBytecode {
-                        num_vars: sc.locals.len() as i32,
+                        num_vars,
                         num_args: arg_names.len(),
                         num_rets: ret_names.len(),
+                        num_ctrlsps: p.ordinal.max(0) as usize,
                         body,
                     };
-                    // first-loaded wins (8497)
+                    // first-loaded wins (8497); key is LOWERCASED — section
+                    // headers pass through to_lowercase() above, and call
+                    // sites normalize the same way (zss_call)
+                    let fname = fname.to_lowercase();
                     if !sc.funcs.contains_key(&fname) {
                         sc.funcs.insert(fname.clone(), fb);
-                        sc.func_order.push(fname);
+                        sc.func_order.push(fname.clone());
                     }
                     sc.locals = saved_locals;
                     continue;

@@ -2644,7 +2644,9 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.fall_xvelocity = ev_f(sc, FALL_XVELOCITY, host, f32::NAN);
     h.fall_yvelocity = ev_f(sc, FALL_YVELOCITY, host, -4.5);
     h.fall_recover = ev_i(sc, FALL_RECOVER, host, -1);
-    h.fall_recovertime = ev_i(sc, FALL_RECOVERTIME, host, 220);
+    // HitDef.reset (char.go:757): fall.recovertime default 4 — NOT 220;
+    // gethitvar-based tech recovery must unlock after 4 ticks in the fall.
+    h.fall_recovertime = ev_i(sc, FALL_RECOVERTIME, host, 4);
     h.sparkno = ev_i(sc, SPARKNO, host, -1);
     h.sparkno_ffx = sc.has(SPARKNO | PREFIX_BIT);
     h.guard_sparkno = ev_i(sc, GUARD_SPARKNO, host, -1);
@@ -2661,7 +2663,10 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     }
     h.air_hittime = ev_i(sc, AIR_HITTIME, host, 20);
     h.fall = ev_b(sc, FALL, host, false);
-    h.air_fall = ev_b(sc, AIR_FALL, host, false);
+    // air.fall unset (IErr in Go, char.go:11739 `hd.air_fall != 0` → true):
+    // air hits put the victim into the fall chain by default — WinMUGEN
+    // behavior, and what makes air-hit victims actually come DOWN.
+    h.air_fall = ev_b(sc, AIR_FALL, host, true);
     h.air_velocity = [ev_f(sc, AIR_VELOCITY, host, 0.0), ev_f(sc, AIR_VELOCITY + 1, host, 0.0), ev_f(sc, AIR_VELOCITY + 2, host, 0.0)];
     h.airguard_velocity = [ev_f(sc, AIRGUARD_VELOCITY, host, 0.0), ev_f(sc, AIRGUARD_VELOCITY + 1, host, 0.0), ev_f(sc, AIRGUARD_VELOCITY + 2, host, 0.0)];
     h.guard_velocity = [ev_f(sc, GUARD_VELOCITY, host, 0.0), ev_f(sc, GUARD_VELOCITY + 1, host, 0.0), ev_f(sc, GUARD_VELOCITY + 2, host, 0.0)];
@@ -2675,9 +2680,15 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.down_bounce = ev_b(sc, DOWN_BOUNCE, host, false);
     h.down_velocity = [ev_f(sc, DOWN_VELOCITY, host, 0.0), ev_f(sc, DOWN_VELOCITY + 1, host, 0.0), ev_f(sc, DOWN_VELOCITY + 2, host, 0.0)];
     h.down_recover = ev_b(sc, DOWN_RECOVER, host, true);
-    h.down_recovertime = ev_i(sc, DOWN_RECOVERTIME, host, 25);
+    // down.recovertime < 0 → resolve to the victim's [Data] liedown.time
+    // at hit time (char.go:14291). -1 is the Go IErr sentinel.
+    h.down_recovertime = ev_i(sc, DOWN_RECOVERTIME, host, -1);
     h.xaccel = ev_f(sc, XACCEL, host, 0.0);
-    h.yaccel = ev_f(sc, YACCEL, host, 0.0);
+    // HitDef.reset (char.go:75): yaccel default 0.35 — the gravity the
+    // common gethit states (5030/5035/5040/5050) apply via
+    // velAdd{y: getHitVar(yAccel)}. 0.0 made air-hit victims fly out the
+    // ceiling with no gravity. Classic 320-localcoord chars: unscaled.
+    h.yaccel = ev_f(sc, YACCEL, host, 0.35);
     h.envshake_time = ev_i(sc, ENVSHAKE_TIME, host, 0);
     h.envshake_freq = ev_f(sc, ENVSHAKE_FREQ, host, 60.0);
     h.envshake_ampl = ev_i(sc, ENVSHAKE_AMPL, host, -4);
