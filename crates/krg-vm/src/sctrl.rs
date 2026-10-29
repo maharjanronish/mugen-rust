@@ -2637,15 +2637,18 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.air_type = ev_i(sc, AIR_TYPE, host, h.ground_type);
     h.fall_type = ev_i(sc, FALL_TYPE, host, 7);
     h.animtype = ev_i(sc, ANIMTYPE, host, 0);
-    h.air_animtype = ev_i(sc, AIR_ANIMTYPE, host, 6);
-    h.fall_animtype = ev_i(sc, FALL_ANIMTYPE, host, 3);
+    // RA_Unknown (-1) sentinels — resolved after ground_velocity below
+    // (char.go:963-967): air_animtype ← animtype; fall_animtype ←
+    // air_animtype (if >= Up) else Back
+    h.air_animtype = ev_i(sc, AIR_ANIMTYPE, host, -1);
+    h.fall_animtype = ev_i(sc, FALL_ANIMTYPE, host, -1);
+    let forcestand_raw = ev_i(sc, FORCESTAND, host, -1);
+    let forcecrouch_raw = ev_i(sc, FORCECROUCH, host, -1);
     h.p1stateno = ev_i(sc, P1STATENO, host, -1);
     h.p2stateno = ev_i(sc, P2STATENO, host, -1);
     h.p2getp1state = ev_b(sc, P2GETP1STATE, host, true);
     h.p1sprpriority = ev_opt_i(sc, P1SPRPRIORITY, host);
     h.p2sprpriority = ev_opt_i(sc, P2SPRPRIORITY, host);
-    h.forcestand = ev_i(sc, FORCESTAND, host, 0) > 0;
-    h.forcecrouch = ev_i(sc, FORCECROUCH, host, 0) > 0;
     h.fall_damage = ev_i(sc, FALL_DAMAGE, host, 0);
     h.fall_xvelocity = ev_f(sc, FALL_XVELOCITY, host, f32::NAN);
     h.fall_yvelocity = ev_f(sc, FALL_YVELOCITY, host, -4.5);
@@ -2675,6 +2678,14 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.air_fall = ev_b(sc, AIR_FALL, host, true);
     h.air_velocity = [ev_f(sc, AIR_VELOCITY, host, 0.0), ev_f(sc, AIR_VELOCITY + 1, host, 0.0), ev_f(sc, AIR_VELOCITY + 2, host, 0.0)];
     h.ground_velocity = [ev_f(sc, GROUND_VELOCITY, host, 0.0), ev_f(sc, GROUND_VELOCITY + 1, host, 0.0), 0.0];
+    // char.go:969 — forcestand defaults to "ground.velocity.y != 0" (a
+    // launcher forces crouchers to stand for the launch anim)
+    h.forcestand = if forcestand_raw < 0 {
+        h.ground_velocity[1] != 0.0
+    } else {
+        forcestand_raw > 0
+    };
+    h.forcecrouch = forcecrouch_raw > 0;
     // NaN = unset → the Go ifnanset fallbacks (char.go:946-951)
     h.airguard_velocity = [ev_f(sc, AIRGUARD_VELOCITY, host, f32::NAN), ev_f(sc, AIRGUARD_VELOCITY + 1, host, f32::NAN), ev_f(sc, AIRGUARD_VELOCITY + 2, host, f32::NAN)];
     h.guard_velocity = [ev_f(sc, GUARD_VELOCITY, host, f32::NAN), ev_f(sc, GUARD_VELOCITY + 1, host, 0.0), ev_f(sc, GUARD_VELOCITY + 2, host, f32::NAN)];
@@ -2692,6 +2703,15 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     }
     if h.airguard_velocity[2].is_nan() {
         h.airguard_velocity[2] = h.air_velocity[2] * 1.5;
+    }
+    // RA_Unknown resolution (char.go:963-967): air_animtype defaults to the
+    // ground animtype; fall_animtype follows air_animtype when that is an
+    // upward reaction, else Back
+    if h.air_animtype < 0 {
+        h.air_animtype = h.animtype;
+    }
+    if h.fall_animtype < 0 {
+        h.fall_animtype = if h.air_animtype >= 4 { h.air_animtype } else { 3 };
     }
     h.ground_hittime = ev_i(sc, GROUND_HITTIME, host, 13);
     h.ground_slidetime = ev_i(sc, GROUND_SLIDETIME, host, 12);

@@ -1968,10 +1968,22 @@ impl Fight {
         if has_ctrl {
             let st = c.state_type;
             let no = c.state_no;
-            if c.inguarddist && bb && st != StateTypeT::L {
-                if no != 120 && no != 130 && no != 140 {
-                    c.change_state(120);
-                }
+            // guard start (char.go:12241). The !inGuardState() gate must
+            // exclude the WHOLE guard family — 120, 130-132, 140 and the
+            // guard-hit states 150-155 (char.go:9958). The old check only
+            // excluded {120,130,140}, so crouch guard (131) re-entered 120
+            // EVERY tick: the pending guard-hit state (152/153/155) got
+            // clobbered before it ever ran, and the char churned through
+            // state 120's `physics: U` (no gravity, no friction) — the
+            // device bugs where a crouch-guarding player "froze", ate clean
+            // hits inside the guard-start U window, or drifted off through
+            // the ceiling with leftover velocity.
+            let in_guard_state = no == 120
+                || (130..=132).contains(&no)
+                || no == 140
+                || (150..=155).contains(&no);
+            if c.inguarddist && c.guard_flag && st != StateTypeT::L && !in_guard_state {
+                c.change_state(120);
             } else if !(c.asf & ASF_NOJUMP != 0) && st == StateTypeT::S && ub {
                 if no != 40 {
                     c.change_state(40);
@@ -2486,6 +2498,11 @@ impl Fight {
                 hd.ground_velocity[1]
             };
             d.ghv.yaccel = hd.yaccel;
+            // hit types (char.go:11634-11637) — the gethit states read these
+            // via getHitVar(groundType)/getHitVar(airType) to pick the shake
+            // anim (5000 vs 5010 family)
+            d.ghv.ground_type = hd.ground_type;
+            d.ghv.air_type = hd.air_type;
             // hittime (char.go:11702-11746): air → air.hittime; ground with
             // a y-component (launcher) → air.hittime; plain ground →
             // ground.hittime
@@ -2499,6 +2516,18 @@ impl Fight {
             // fall flags (char.go:11739/11752): air hits fall by default
             // (air.fall unset → IErr ≠ 0 → true in Go), ground hits use fall
             d.ghv.fall = d.ghv.fall || if airborne { hd.air_fall } else { hd.fall };
+            // gethitAnimtype (char.go:8102): fall → fall_animtype; air →
+            // air_animtype; ground back-and-up reactions with no y-velocity
+            // play as hard instead (the MUGEN quirk)
+            d.ghv.animtype = if d.ghv.fall {
+                hd.fall_animtype
+            } else if airborne {
+                hd.air_animtype
+            } else if hd.animtype >= 3 && d.ghv.yvel == 0.0 {
+                2
+            } else {
+                hd.animtype
+            };
             d.ghv.fall_recover = hd.fall_recover < 0 || hd.fall_recover > 0;
             d.ghv.fall_recovertime = hd.fall_recovertime.max(0);
             // clean hit — this contact is not a guard
@@ -2543,12 +2572,31 @@ impl Fight {
                     attacker_facing
                 };
             }
-            // gethit state (char.go tick 13069): 5000/5010/5020
-            let gs = match d.state_type {
-                StateTypeT::S => 5000,
-                StateTypeT::C => 5010,
-                StateTypeT::A => 5020,
-                _ => 5000,
+            // gethit state routing (char.go:13100-13131). Downed+grounded
+            // → 5080; ground Trip → 5070 (the trip anim chain); otherwise
+            // forcestand/forcecrouch may retag the statetype before picking
+            // 5000/5010/5020. The old code routed EVERYTHING to 5000/5010/
+            // 5020 — trips played the plain hit anims and crouch victims of
+            // launchers stayed crouched through the launch.
+            let gs = if d.state_type == StateTypeT::L && d.pos[1] == 0.0 {
+                5080 // downed get-hit (shaking)
+            } else if !airborne && hd.ground_type == 3 {
+                5070 // HT_Trip: tripped get-hit (shaking)
+            } else {
+                if hd.forcestand && d.state_type == StateTypeT::C {
+                    d.state_type = StateTypeT::S;
+                } else if hd.forcecrouch && d.state_type == StateTypeT::S {
+                    d.state_type = StateTypeT::C;
+                }
+                match d.state_type {
+                    StateTypeT::S => 5000,
+                    StateTypeT::C => {
+                        // KO'd crouch victims go down standing (char.go:13126)
+                        if dmg >= d.life { 5000 } else { 5010 }
+                    }
+                    StateTypeT::A => 5020,
+                    _ => 5000,
+                }
             };
             d.move_type = MoveTypeT::H;
             d.change_state(gs);
