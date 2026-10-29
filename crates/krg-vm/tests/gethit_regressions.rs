@@ -289,3 +289,70 @@ fn round_machine_restarts_and_match_remakes() {
     assert_eq!(fight.round_state, 2, "rematch did not restart cleanly");
     assert!(fight.chars[0].ctrl, "rematch P1 has no ctrl after intro");
 }
+
+/// The full air-hit fall chain: victim hit while airborne must tumble down
+/// (5020 → 5030 → 5050), land (5100), lie down (5110), get up (5120) and
+/// return to 0 — never stuck floating, never escaping through the ceiling.
+/// This is the exact reported "enemy jumps out of the ceiling" scenario.
+#[test]
+fn air_hit_falls_lands_and_gets_up() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    skip_intro(&mut fight);
+
+    // close the gap first so the jab connects during P2's jump
+    for _ in 0..28 {
+        let mut i1 = none();
+        i1[3] = true;
+        fight.step(&[i1, none()]);
+    }
+    // P2 jumps FORWARD toward P1 (forward, NOT back — holding back would
+    // now correctly GUARD the jab); P1 jabs so the hit resolves while P2
+    // is still airborne
+    let mut hit_in_air = false;
+    for t in 0..26 {
+        let mut i2 = none();
+        i2[0] = t < 14; // U (jump takes off, then release)
+        i2[2] = t < 14; // L (forward for the left-facing P2 — no guard)
+        let mut i1 = none();
+        i1[8] = t < 14; // X
+        fight.step(&[i1, i2]);
+        // hit lands mid-air; the gethit state applies once the defender's
+        // hitpause expires (state 5020 while pos.y < -5)
+        if fight.chars[1].state_no >= 5000 && fight.chars[1].pos[1] < -5.0 {
+            hit_in_air = true;
+        }
+    }
+    assert!(hit_in_air, "test setup failed: no air hit landed");
+
+    // trace the chain: must pass through the fall/land/liedown/getup family
+    let mut saw_fall = false;
+    let mut saw_liedown = false;
+    let mut peak = 0.0f32;
+    for t in 0..240 {
+        fight.step(&[none(), none()]);
+        let p2 = &fight.chars[1];
+        peak = peak.min(p2.pos[1]);
+        match p2.state_no {
+            5030 | 5035 | 5050 => saw_fall = true,
+            5100 | 5110 => saw_liedown = true,
+            _ => {}
+        }
+        // never above a super-jump-height ceiling, never stuck floating
+        assert!(p2.pos[1] > -300.0, "t{t}: P2 escaped ceiling (y={})", p2.pos[1]);
+        if t > 150 && p2.alive {
+            assert!(
+                p2.state_no < 5000 || p2.state_no == 5120,
+                "t{t}: P2 stuck in gethit chain (state {})",
+                p2.state_no
+            );
+        }
+    }
+    let p2 = &fight.chars[1];
+    assert!(saw_fall, "air hit did not enter the fall chain (5030/5050)");
+    assert!(saw_liedown, "victim never landed (5100/5110 missing)");
+    assert!(peak > -300.0, "peak y={peak} — flew out the ceiling");
+    assert!(p2.state_no < 5000, "victim never got up (state {})", p2.state_no);
+    assert!(p2.ctrl, "victim has no ctrl after getting up");
+    assert!(p2.pos[1] >= -0.001, "victim not back on the floor (y={})", p2.pos[1]);
+}

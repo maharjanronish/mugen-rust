@@ -1074,7 +1074,11 @@ impl StateHost for CharState {
             // the casualty: hitVelSet / the hitOver changeState never ran).
             let mut ps: Vec<i32> = vec![0; fb.num_ctrlsps];
             let _ = run_state_bytecode_nodes(&fb.body, &mut ps, self);
-            // collect rets
+            // collect rets — CLEAR first: the caller may pass a pre-sized
+            // vec (Node::Call passes vec![v_none(); ret.len()]); pushing
+            // onto that left the values misaligned by one slot and every
+            // `let a = call f(...)` read $a as None→0 (gethit anims broke)
+            rets.clear();
             for i in 0..fb.num_rets {
                 rets.push(self.locals.get(fb.num_args + i).copied().unwrap_or_else(v_none));
             }
@@ -1137,6 +1141,14 @@ impl CharRuntime for CharState {
         self.change_state(no);
     }
     fn change_anim(&mut self, no: i32, elem: i32, elemtime: i32, _ffx: bool) {
+        // Ikemen semantics (char.go:5022 changeAnimEx assigns the per-
+        // instance anim OBJECT): re-assigning the SAME anim number keeps
+        // the current progress — common1's `else { changeAnim value: anim }`
+        // idiom relies on it. Resetting here (the old behavior) froze
+        // every gethit anim at element 0 forever.
+        if no == self.anim.anim_no && elem < 0 {
+            return;
+        }
         self.set_anim(no);
         if elem >= 0 {
             // seek to element
@@ -1680,6 +1692,20 @@ impl Fight {
                 // frozen this frame (Go keeps anim frozen too)
                 continue;
             }
+            // SCF_guard (char.go:12467): the char is "guarding" when holding
+            // back with ctrl in a non-attacking state, or while inside the
+            // guard states (120-140, 150-155); statetype L can never guard.
+            // Computed before the action so hit_detection sees this tick's
+            // intent — this is what makes blocking actually BLOCK.
+            {
+                let c = &mut self.chars[i];
+                let back_held = c.cmd_list.buffer.cur[crate::cmd::KB] > 0;
+                let in_guard_state = (120..=155).contains(&c.state_no);
+                c.guard_flag = back_held
+                    && c.state_type != StateTypeT::L
+                    && (((c.ctrl || c.state_no == 52) && c.move_type == MoveTypeT::I)
+                        || in_guard_state);
+            }
             self.action_prepare(i);
             self.auto_turn(i);
             self.action_run(i);
@@ -1989,6 +2015,7 @@ impl Fight {
             c.ghv.hitshaketime = 0;
             c.ghv.fall = false;
             c.ghv.fallcount = 0;
+            c.ghv.guarded = false;
             c.ghv.down_recovertime = liedown_time;
         }
         if c.ghv.hitshaketime <= 0 && c.ghv.hittime >= 0 {
@@ -2254,6 +2281,64 @@ impl Fight {
             if hd.hitflag & st_bit == 0 {
                 continue;
             }
+            // ── guard resolution (char.go:11429-11446 + 11650-11680) ──────
+            // The defender guards when holding back in a guard-legal state
+            // AND the HitDef's guardflag allows their statetype. A guarded
+            // hit deals chip damage only (damage[1] — 0 for KFM's normals),
+            // uses the guard pauses/velocities and enters the guard states
+            // 150/152/154 instead of the 5000 gethit family. Before this,
+            // blocking chars ate full hits — the CPU visibly "blocked" but
+            // took every punch clean.
+            let gf_bit = match d.state_type {
+                StateTypeT::S => 1, // HF_H
+                StateTypeT::C => 2, // HF_L
+                StateTypeT::A => 4, // HF_A
+                _ => 0,
+            };
+            let guard_kill = hd.guard_kill.unwrap_or(true);
+            let dmg_g = (hd.damage[1] as f32 * attacker_attack / defender_def) as i32;
+            if d.guard_flag && gf_bit != 0 && (hd.guardflag & gf_bit) != 0
+                && (dmg_g < d.life || !guard_kill)
+            {
+                let airborne_g = d.state_type == StateTypeT::A;
+                let byf_g = -(attacker_facing as f32);
+                d.ghv.guarded = true;
+                d.ghv.guardcount += 1;
+                d.ghv.damage = dmg_g;
+                d.life -= dmg_g;
+                if d.life < 0 {
+                    d.life = if guard_kill { 0 } else { 1 };
+                }
+                d.alive = d.life > 0;
+                d.ghv.hitshaketime = hd.guard_pausetime[1].max(0);
+                d.ghv.hittime = hd.guard_hittime.max(0);
+                d.ghv.slidetime = hd.guard_slidetime.max(0);
+                d.ghv.xvel = if airborne_g {
+                    d.ghv.ctrltime = hd.airguard_ctrltime.max(0);
+                    d.ghv.yvel = hd.airguard_velocity[1];
+                    hd.airguard_velocity[0] * byf_g
+                } else {
+                    d.ghv.ctrltime = hd.guard_ctrltime.max(0);
+                    d.ghv.yvel = 0.0;
+                    hd.guard_velocity[0] * byf_g
+                };
+                d.ghv.fall = false;
+                // guard states: 150 stand / 152 crouch / 154 air (char.go:13103)
+                let gs_guard = match d.state_type {
+                    StateTypeT::S => 150,
+                    StateTypeT::C => 152,
+                    _ => 154,
+                };
+                d.move_type = MoveTypeT::H;
+                d.change_state(gs_guard);
+                // attacker freezes for guard_pausetime[0]; the DEFENDER gets
+                // no hitpause on guard — states 150/152/154 freeze via their
+                // own velset 0,0 + hitshaketime (char.go:14318, 11652-11656)
+                let a2 = &mut self.chars[ai];
+                a2.hitpause_time = hd.guard_pausetime[0].max(0);
+                a2.uniq_hit_count += 1;
+                continue; // guard resolved — no hit resolution this contact
+            }
             d.life -= dmg;
             if d.life < 0 {
                 d.life = if hd.kill.unwrap_or(true) { 0 } else { 1 };
@@ -2293,6 +2378,8 @@ impl Fight {
             d.ghv.fall = d.ghv.fall || if airborne { hd.air_fall } else { hd.fall };
             d.ghv.fall_recover = hd.fall_recover < 0 || hd.fall_recover > 0;
             d.ghv.fall_recovertime = hd.fall_recovertime.max(0);
+            // clean hit — this contact is not a guard
+            d.ghv.guarded = false;
             // char.go:14291 — down.recovertime < 0 → [Data] liedown.time
             d.ghv.down_recovertime = if hd.down_recovertime < 0 {
                 d.gi.data.liedown_time

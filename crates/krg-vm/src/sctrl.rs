@@ -1015,6 +1015,7 @@ pub mod hd {
     pub const ENVSHAKE_PHASE: u16 = 94;
     pub const REDLIFE: u16 = 95;     // 2 args
     pub const PAUSETIME: u16 = 96;   // 2 args (attacker, defender)
+    pub const GUARD_PAUSETIME: u16 = 98; // 2 args (attacker, defender)
     pub const REDIRECTID: u16 = 97;
 }
 
@@ -1372,6 +1373,7 @@ pub fn compile_sctrl(
                 ps("guard.hittime", hd::GUARD_HITTIME, ValueType::Int, 1),
                 ps("guard.ctrltime", hd::GUARD_CTRLTIME, ValueType::Int, 1),
                 ps("airguard.ctrltime", hd::AIRGUARD_CTRLTIME, ValueType::Int, 1),
+                ps("guard.pausetime", hd::GUARD_PAUSETIME, ValueType::Int, 2),
                 ps("ground.slidetime", hd::GROUND_SLIDETIME, ValueType::Int, 1),
                 ps("guard.slidetime", hd::GUARD_SLIDETIME, ValueType::Int, 1),
                 ps("down.bounce", hd::DOWN_BOUNCE, ValueType::Bool, 1),
@@ -1742,6 +1744,8 @@ pub struct HitDefT {
     pub guard_hittime: i32,
     pub guard_ctrltime: i32,
     pub airguard_ctrltime: i32,
+    /// guard.pausetime (char.go:931 falls back to pausetime)
+    pub guard_pausetime: [i32; 2],
     pub ground_slidetime: i32,
     pub guard_slidetime: i32,
     pub down_bounce: bool,
@@ -2668,15 +2672,58 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     // behavior, and what makes air-hit victims actually come DOWN.
     h.air_fall = ev_b(sc, AIR_FALL, host, true);
     h.air_velocity = [ev_f(sc, AIR_VELOCITY, host, 0.0), ev_f(sc, AIR_VELOCITY + 1, host, 0.0), ev_f(sc, AIR_VELOCITY + 2, host, 0.0)];
-    h.airguard_velocity = [ev_f(sc, AIRGUARD_VELOCITY, host, 0.0), ev_f(sc, AIRGUARD_VELOCITY + 1, host, 0.0), ev_f(sc, AIRGUARD_VELOCITY + 2, host, 0.0)];
-    h.guard_velocity = [ev_f(sc, GUARD_VELOCITY, host, 0.0), ev_f(sc, GUARD_VELOCITY + 1, host, 0.0), ev_f(sc, GUARD_VELOCITY + 2, host, 0.0)];
     h.ground_velocity = [ev_f(sc, GROUND_VELOCITY, host, 0.0), ev_f(sc, GROUND_VELOCITY + 1, host, 0.0), 0.0];
+    // NaN = unset → the Go ifnanset fallbacks (char.go:946-951)
+    h.airguard_velocity = [ev_f(sc, AIRGUARD_VELOCITY, host, f32::NAN), ev_f(sc, AIRGUARD_VELOCITY + 1, host, f32::NAN), ev_f(sc, AIRGUARD_VELOCITY + 2, host, f32::NAN)];
+    h.guard_velocity = [ev_f(sc, GUARD_VELOCITY, host, f32::NAN), ev_f(sc, GUARD_VELOCITY + 1, host, 0.0), ev_f(sc, GUARD_VELOCITY + 2, host, f32::NAN)];
+    if h.guard_velocity[0].is_nan() {
+        h.guard_velocity[0] = h.ground_velocity[0];
+    }
+    if h.guard_velocity[2].is_nan() {
+        h.guard_velocity[2] = h.ground_velocity[2];
+    }
+    if h.airguard_velocity[0].is_nan() {
+        h.airguard_velocity[0] = h.air_velocity[0] * 1.5;
+    }
+    if h.airguard_velocity[1].is_nan() {
+        h.airguard_velocity[1] = h.air_velocity[1] * 0.5;
+    }
+    if h.airguard_velocity[2].is_nan() {
+        h.airguard_velocity[2] = h.air_velocity[2] * 1.5;
+    }
     h.ground_hittime = ev_i(sc, GROUND_HITTIME, host, 13);
-    h.guard_hittime = ev_i(sc, GUARD_HITTIME, host, 17);
-    h.guard_ctrltime = ev_i(sc, GUARD_CTRLTIME, host, 17);
-    h.airguard_ctrltime = ev_i(sc, AIRGUARD_CTRLTIME, host, 12);
     h.ground_slidetime = ev_i(sc, GROUND_SLIDETIME, host, 12);
-    h.guard_slidetime = ev_i(sc, GUARD_SLIDETIME, host, 12);
+    // guard.* params use the -1 IErr sentinel, then the Go fallback chain
+    // (char.go:931-948): guard.hittime ← ground.slidetime ← ground.hittime;
+    // guard.slidetime ← guard.hittime; guard.ctrltime ← guard.slidetime;
+    // airguard.ctrltime ← guard.ctrltime; guard.velocity ← ground.velocity;
+    // airguard.velocity ← air.velocity × (1.5, 0.5, 1.5).
+    h.guard_hittime = ev_i(sc, GUARD_HITTIME, host, -1);
+    h.guard_ctrltime = ev_i(sc, GUARD_CTRLTIME, host, -1);
+    h.airguard_ctrltime = ev_i(sc, AIRGUARD_CTRLTIME, host, -1);
+    h.guard_slidetime = ev_i(sc, GUARD_SLIDETIME, host, -1);
+    h.guard_pausetime = [
+        ev_i(sc, GUARD_PAUSETIME, host, -1),
+        ev_i(sc, GUARD_PAUSETIME + 1, host, -1),
+    ];
+    if h.guard_pausetime[0] < 0 {
+        h.guard_pausetime[0] = h.pausetime[0];
+    }
+    if h.guard_pausetime[1] < 0 {
+        h.guard_pausetime[1] = h.pausetime[1];
+    }
+    if h.guard_hittime < 0 {
+        h.guard_hittime = if h.ground_slidetime >= 0 { h.ground_slidetime } else { h.ground_hittime };
+    }
+    if h.guard_slidetime < 0 {
+        h.guard_slidetime = h.guard_hittime;
+    }
+    if h.guard_ctrltime < 0 {
+        h.guard_ctrltime = h.guard_slidetime;
+    }
+    if h.airguard_ctrltime < 0 {
+        h.airguard_ctrltime = h.guard_ctrltime;
+    }
     h.down_bounce = ev_b(sc, DOWN_BOUNCE, host, false);
     h.down_velocity = [ev_f(sc, DOWN_VELOCITY, host, 0.0), ev_f(sc, DOWN_VELOCITY + 1, host, 0.0), ev_f(sc, DOWN_VELOCITY + 2, host, 0.0)];
     h.down_recover = ev_b(sc, DOWN_RECOVER, host, true);
