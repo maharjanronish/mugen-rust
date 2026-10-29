@@ -111,11 +111,14 @@ pub struct CharVelocity {
     pub run_fwd: (f32, f32),
     pub run_back: (f32, f32),
     pub jump_y: f32,
+    /// jump.neu = x, y — the x component (neutral-jump drift, usually 0)
+    pub jump_neu_x: f32,
     pub jump_back: f32,
     pub jump_fwd: f32,
     pub runjump_back: (f32, f32),
     pub runjump_fwd: (f32, f32),
     pub airjump_y: f32,
+    pub airjump_neu_x: f32,
     pub airjump_back: f32,
     pub airjump_fwd: f32,
     pub air_gethit_ground_recover: (f32, f32),
@@ -131,15 +134,17 @@ impl Default for CharVelocity {
     fn default() -> Self {
         CharVelocity {
             walk_fwd: 2.4,
-            walk_back: 2.2,
+            walk_back: -2.2,
             run_fwd: (4.0, 0.0),
             run_back: (-4.2, 0.0),
             jump_y: -8.0,
+            jump_neu_x: 0.0,
             jump_back: -2.75,
             jump_fwd: 2.6,
             runjump_back: (-2.55, -8.0),
             runjump_fwd: (2.5, -8.0),
             airjump_y: -8.5,
+            airjump_neu_x: 0.0,
             airjump_back: -2.55,
             airjump_fwd: 2.5,
             air_gethit_ground_recover: (-0.35, -5.0),
@@ -884,7 +889,11 @@ pub fn read_constants(
                 if sec.read_f32("run.back", &mut [&mut a0, &mut a1]) {
                     velocity.run_back = (a0, a1);
                 }
-                if sec.read_f32("jump.neu", &mut [&mut f[0]]) { velocity.jump_y = f[0]; }
+                let (mut jx, mut jy) = (0.0f32, 0.0f32);
+                if sec.read_f32("jump.neu", &mut [&mut jx, &mut jy]) {
+                    velocity.jump_neu_x = jx;
+                    velocity.jump_y = jy;
+                }
                 if sec.read_f32("jump.back", &mut [&mut f[0]]) { velocity.jump_back = f[0]; }
                 if sec.read_f32("jump.fwd", &mut [&mut f[0]]) { velocity.jump_fwd = f[0]; }
                 let (mut a0, mut a1) = (0.0f32, 0.0f32);
@@ -895,7 +904,11 @@ pub fn read_constants(
                 if sec.read_f32("runjump.fwd", &mut [&mut a0, &mut a1]) {
                     velocity.runjump_fwd = (a0, a1);
                 }
-                if sec.read_f32("airjump.neu", &mut [&mut f[0]]) { velocity.airjump_y = f[0]; }
+                let (mut jx, mut jy) = (0.0f32, 0.0f32);
+                if sec.read_f32("airjump.neu", &mut [&mut jx, &mut jy]) {
+                    velocity.airjump_neu_x = jx;
+                    velocity.airjump_y = jy;
+                }
                 if sec.read_f32("airjump.back", &mut [&mut f[0]]) { velocity.airjump_back = f[0]; }
                 if sec.read_f32("airjump.fwd", &mut [&mut f[0]]) { velocity.airjump_fwd = f[0]; }
                 let (mut a0, mut a1) = (0.0f32, 0.0f32);

@@ -2605,7 +2605,8 @@ fn build_hitdef(sc: &Sctrl, host: &mut dyn CharRuntime) -> HitDefT {
     h.attr_st = ev_i(sc, ATTR_ST, host, 0);
     h.attr_kind = ev_i(sc, ATTR_KIND, host, 0);
     h.guardflag = ev_i(sc, GUARDFLAG, host, 0);
-    h.hitflag = ev_i(sc, HITFLAG, host, 0);
+    // default hitflag "MAF" = H|L|A (char.go HitDef default)
+    h.hitflag = ev_i(sc, HITFLAG, host, 7);
     h.hitflag_minus = ev_b(sc, HITFLAG_MINUS, host, false);
     h.hitflag_plus = ev_b(sc, HITFLAG_PLUS, host, false);
     h.affectteam = ev_i(sc, AFFECTTEAM, host, 0);

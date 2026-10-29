@@ -282,6 +282,12 @@ pub struct CharState {
     pub stage_right: f32,
     pub attack_dist: f32,
     pub attack_dist_override: f32,
+    // hitdef target latch (char.go hasTargetOfHitdef): ids this HitDef
+    // activation has already hit — cleared when a new HitDef sctrl runs.
+    // Without it one hitdef re-hits every frame (60×23 dmg/s = instant KO).
+    pub hitdef_targets: Vec<i32>,
+    // PlayerPush sctrl off-switch (CSF_playerpush)
+    pub no_push: bool,
 }
 
 // ASF bits (mirror sctrl::asf)
@@ -363,6 +369,8 @@ impl CharState {
             stage_right: 320.0,
             attack_dist: gi.size.attack_dist,
             attack_dist_override: -1.0,
+            hitdef_targets: Vec::new(),
+            no_push: false,
         }
     }
 
@@ -400,6 +408,13 @@ impl CharState {
         self.state_no = no;
         self.time_in_state = 0;
         self.store_move_type = self.move_type;
+        // a state change re-arms the hitdef's targets (char.go: changeState →
+        // hitdef.reset clears hitdefTargets unless hitdefpersist) — this is
+        // what stops a jab from landing 60×/s while its AnimElem trigger
+        // stays true, while still letting jab→jab chains connect. The
+        // hitdef itself is retired with the state too (hitdef.reset).
+        self.hitdef_targets.clear();
+        self.hitdef = None;
         // reset persistent counters for the new state
         let n = self
             .gi
@@ -696,8 +711,10 @@ impl Ctx for CharState {
             VelocityRunBackX => v_float(gi.velocity.run_back.0),
             VelocityRunBackY => v_float(gi.velocity.run_back.1),
             VelocityJumpY => v_float(gi.velocity.jump_y),
+            VelocityJumpNeuX => v_float(gi.velocity.jump_neu_x),
             VelocityJumpBack => v_float(gi.velocity.jump_back),
             VelocityJumpFwd => v_float(gi.velocity.jump_fwd),
+            VelocityAirJumpNeuX => v_float(gi.velocity.airjump_neu_x),
             VelocityRunJumpBackX => v_float(gi.velocity.runjump_back.0),
             VelocityRunJumpBackY => v_float(gi.velocity.runjump_back.1),
             VelocityRunJumpFwdX => v_float(gi.velocity.runjump_fwd.0),
@@ -858,6 +875,10 @@ pub struct P2View {
     pub facing: i32,
     pub alive: bool,
     pub ground_front: f32,
+    /// p2's effective guard distance (AttackDist override or
+    /// size.attack.dist) — the *attacker's* reach decides whether *we*
+    /// can guard (char.go:14100 guard distance check).
+    pub attack_dist: f32,
 }
 
 impl StateTypeT {
@@ -1293,7 +1314,9 @@ impl CharRuntime for CharState {
     fn trans(&mut self, _mode: i32, _alpha: [i32; 2]) {}
     fn env_shake(&mut self, _time: i32, _ampl: i32, _freq: f32, _phase: f32, _mul: f32) {}
     fn screen_bound(&mut self, _v: bool, _mx: bool, _my: bool) {}
-    fn player_push(&mut self, _v: bool, _priority: i32, _affectteam: i32) {}
+    fn player_push(&mut self, v: bool, _priority: i32, _affectteam: i32) {
+        self.no_push = !v;
+    }
     fn width(&mut self, _player: Option<[f32; 2]>, _edge: Option<[f32; 2]>, _height: Option<[f32; 2]>) {}
     fn pause(&mut self, _time: i32, _movetime: i32, _pausebg: bool, _endcmdbuftime: i32, _superpause: bool, _darken: bool) {}
     fn helper_spawn(&mut self, _helper: &HelperT) {}
@@ -1539,6 +1562,15 @@ impl Fight {
                     ground_front: p2
                         .map(|p| p.gi.size.ground_front)
                         .unwrap_or(16.0),
+                    attack_dist: p2
+                        .map(|p| {
+                            if p.attack_dist_override >= 0.0 {
+                                p.attack_dist_override
+                            } else {
+                                p.attack_dist
+                            }
+                        })
+                        .unwrap_or(160.0),
                 }
             };
             let c = &mut self.chars[i];
@@ -1547,16 +1579,14 @@ impl Fight {
             c.round_no_cache = self.round_no;
             c.stage_left = self.stage_left;
             c.stage_right = self.stage_right;
+            // Proximity guard fires only while p2 is actually swinging
+            // (char.go:14100 — the flag is set during hit detection, gated
+            // on the attacker's moveType == A). With an idle opponent,
+            // holding back must WALK, not guard.
             c.inguarddist = round_live
                 && c.p2.alive
-                && (c.p2.pos[0] - c.pos[0]).abs() <= {
-                    let _ = c.facing;
-                    if c.attack_dist_override >= 0.0 {
-                        c.attack_dist_override
-                    } else {
-                        c.attack_dist
-                    }
-                };
+                && c.p2.move_type == MoveTypeT::A
+                && (c.p2.pos[0] - c.pos[0]).abs() <= c.p2.attack_dist;
             c.attack_dist_override = -1.0;
         }
 
@@ -1567,8 +1597,10 @@ impl Fight {
                 let (a, b, b2, c2) = (btns[4], btns[5], btns[6], btns[7]);
                 let (x, y, z, s) = (btns[8], btns[9], btns[10], btns[11]);
                 let (d2, w, m) = (btns[12], btns[13], false);
-                // engine B/F: facing right → back=left, forward=right
-                let (bf, ff) = (l, r);
+                // engine B/F are facing-relative (input.go: raw L/R → logical).
+                // Facing left swaps them, or "holdback" walks forward after a
+                // side switch and the CPU fights while moonwalking away.
+                let (bf, ff) = if c.facing >= 0 { (l, r) } else { (r, l) };
                 c.cmd_list.buffer.update_input_time(
                     u, d, l, r, bf, ff, a, b, b2, c2, x, y, z, s, d2, w,
                 );
@@ -1600,6 +1632,10 @@ impl Fight {
         if round_live {
             self.hit_detection();
         }
+
+        // player push (char.go:14522 pushDetection) — after physics so
+        // walk/jump positions have settled; keeps bodies from overlapping.
+        self.push_detection();
 
         // camera follow (after physics + hits settle positions)
         self.camera_update();
@@ -1671,6 +1707,7 @@ impl Fight {
             c.ctrl = false;
             c.hitpause_time = 0;
             c.hitdef = None;
+            c.hitdef_targets.clear();
             c.move_type = MoveTypeT::I;
             c.pending_state = None;
             c.time_in_state = 0;
@@ -1840,6 +1877,106 @@ impl Fight {
         }
     }
 
+    /// Player push (char.go:14522 pushDetection, 2D x-axis subset).
+    ///
+    /// Both fighters' size boxes ([Size] ground_back/ground_front around the
+    /// axis, mirrored by facing) must overlap on x *and* their current clsn2
+    /// boxes must overlap — the MUGEN quirk that lets a jumper pass over a
+    /// stander without pushing. The overlap splits 50/50 (equal
+    /// weight/pushfactor), which resolves the walk-into-each-other case in
+    /// about a frame and stops the "merged fighters" glitch.
+    fn push_detection(&mut self) {
+        for ai in 0..self.chars.len() {
+            for di in (ai + 1)..self.chars.len() {
+                let (a, d) = (&self.chars[ai], &self.chars[di]);
+                if a.is_helper || d.is_helper || !a.alive || !d.alive {
+                    continue;
+                }
+                if a.no_push || d.no_push {
+                    continue;
+                }
+                // size boxes in stage space, facing-mirrored
+                let afront = a.gi.size.ground_front;
+                let aback = a.gi.size.ground_back;
+                let dfront = d.gi.size.ground_front;
+                let dback = d.gi.size.ground_back;
+                let (al, ar) = if a.facing >= 0 {
+                    (a.pos[0] - aback, a.pos[0] + afront)
+                } else {
+                    (a.pos[0] - afront, a.pos[0] + aback)
+                };
+                let (dl, dr) = if d.facing >= 0 {
+                    (d.pos[0] - dback, d.pos[0] + dfront)
+                } else {
+                    (d.pos[0] - dfront, d.pos[0] + dback)
+                };
+                let ov = ar.min(dr) - al.max(dl);
+                if ov <= 0.0 {
+                    continue;
+                }
+                // clsn2 overlap gate (char.go: "only Mugen does this").
+                // Mirror-normalized extents — see hit_detection for why the
+                // naive `min*facing` produces an inverted box when facing -1.
+                let clsn_ov = |c1: &CharState, c2: &CharState| -> bool {
+                    let Some(a1) = c1.gi.anims.anims.get(&c1.anim.anim_no) else {
+                        return false;
+                    };
+                    let Some(f1) = a1.frames.get(c1.anim.curelem.max(0) as usize) else {
+                        return false;
+                    };
+                    let Some(a2) = c2.gi.anims.anims.get(&c2.anim.anim_no) else {
+                        return false;
+                    };
+                    let Some(f2) = a2.frames.get(c2.anim.curelem.max(0) as usize) else {
+                        return false;
+                    };
+                    if f1.clsn2.is_empty() || f2.clsn2.is_empty() {
+                        return false;
+                    }
+                    let bx = |x: f32, f: i32, b: &[f32; 4]| -> (f32, f32) {
+                        let (mn, mx) = (b[0].min(b[2]), b[0].max(b[2]));
+                        if f >= 0 {
+                            (x + mn, x + mx)
+                        } else {
+                            (x - mx, x - mn)
+                        }
+                    };
+                    for b1 in &f1.clsn2 {
+                        let (l1, r1) = bx(c1.pos[0], c1.facing, b1);
+                        let (t1, bt1) = (
+                            c1.pos[1] + b1[1].min(b1[3]),
+                            c1.pos[1] + b1[1].max(b1[3]),
+                        );
+                        for b2 in &f2.clsn2 {
+                            let (l2, r2) = bx(c2.pos[0], c2.facing, b2);
+                            let (t2, bt2) = (
+                                c2.pos[1] + b2[1].min(b2[3]),
+                                c2.pos[1] + b2[1].max(b2[3]),
+                            );
+                            if l1 < r2 && r1 > l2 && t1 < bt2 && bt1 > t2 {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                };
+                if !clsn_ov(a, d) {
+                    continue;
+                }
+                // split the overlap: each side gives way by half
+                let a_left = a.pos[0] <= d.pos[0];
+                let (da, dd) = (ov * 0.5, ov * 0.5);
+                if a_left {
+                    self.chars[ai].pos[0] -= da;
+                    self.chars[di].pos[0] += dd;
+                } else {
+                    self.chars[ai].pos[0] += da;
+                    self.chars[di].pos[0] -= dd;
+                }
+            }
+        }
+    }
+
     /// v1 hit detection: attacker clsn1 (attack box) vs defender clsn2
     /// (defense box), attributes, damage, hitpause, gethit state entry.
     fn hit_detection(&mut self) {
@@ -1867,6 +2004,12 @@ impl Fight {
                 if di == ai || !d.alive {
                     continue;
                 }
+                // one hit per target per HitDef activation (char.go
+                // hasTargetOfHitdef) — without this the same hitdef lands
+                // every frame, which reads as a one-hit KO.
+                if a.hitdef_targets.contains(&d.id) {
+                    continue;
+                }
                 let Some(danim) = d.gi.anims.anims.get(&d.anim.anim_no) else {
                     continue;
                 };
@@ -1876,19 +2019,29 @@ impl Fight {
                 if dframe.clsn2.is_empty() {
                     continue;
                 }
-                // boxes: [left, top, right, bottom] in char space
+                // boxes: [left, top, right, bottom] in char space.
+                // Facing-left mirroring must re-normalize min/max AFTER the
+                // flip — multiplying extents by −1 leaves (l,r) inverted and
+                // every overlap test against a left-facing char fails.
                 let scale = a.gi.size.xscale;
                 let (ax, af) = (a.pos[0], a.facing as f32);
                 let (dx, df) = (d.pos[0], d.facing as f32);
+                let ext = |b: &[f32; 4]| (b[0].min(b[2]), b[0].max(b[2]));
+                let bx = |x: f32, f: f32, b: &[f32; 4], s: f32| -> (f32, f32) {
+                    let (mn, mx) = ext(b);
+                    if f >= 0.0 {
+                        (x + mn * s, x + mx * s)
+                    } else {
+                        (x - mx * s, x - mn * s)
+                    }
+                };
                 let mut overlap = false;
                 for b1 in &frame.clsn1 {
                     for b2 in &dframe.clsn2 {
-                        let l1 = ax + b1[0].min(b1[2]) * af * scale;
-                        let r1 = ax + b1[0].max(b1[2]) * af * scale;
+                        let (l1, r1) = bx(ax, af, b1, scale);
                         let t1 = a.pos[1] + b1[1].min(b1[3]);
                         let bt1 = a.pos[1] + b1[1].max(b1[3]);
-                        let l2 = dx + b2[0].min(b2[2]) * df;
-                        let r2 = dx + b2[0].max(b2[2]) * df;
+                        let (l2, r2) = bx(dx, df, b2, 1.0);
                         let t2 = d.pos[1] + b2[1].min(b2[3]);
                         let bt2 = d.pos[1] + b2[1].max(b2[3]);
                         if l1 < r2 && r1 > l2 && t1 < bt2 && bt1 > t2 {
@@ -1907,6 +2060,9 @@ impl Fight {
         }
         // resolve
         for (ai, di, hd) in hits {
+            // latch this target for the current hitdef activation
+            let d_id = self.chars[di].id;
+            self.chars[ai].hitdef_targets.push(d_id);
             let attacker_attack = self.chars[ai].attack_mul * self.chars[ai].gi.data.attack as f32 / 100.0;
             let defender_def = self.chars[di].defence_mul * self.chars[di].gi.data.defence as f32 / 100.0;
             let attacker_facing = self.chars[ai].facing;
@@ -2147,7 +2303,15 @@ pub fn compile_char(
         CharVelocity::default(),
         CharMovement::default(),
     );
+    // constants precedence matches Ikemen: common.const first, then the
+    // char's own cns files ([Data]/[Size]/[Velocity]/[Movement] at the top
+    // of kfm.cns) override. Skipping the char pass made every fighter run
+    // on generic defaults — walk.back lost its sign and KFM walked his
+    // "backward" vel forward.
     read_constants(common_const_text, sc, &mut data, &mut size, &mut velocity, &mut movement);
+    for t in cns_texts {
+        read_constants(t, sc, &mut data, &mut size, &mut velocity, &mut movement);
+    }
 
     let mut states: HashMap<i32, StateBytecode> = HashMap::new();
     // KFM is a Mugen-version char: negoverride = true

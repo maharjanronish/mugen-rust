@@ -188,6 +188,8 @@ pub struct Scene {
     prev_input: u32,
     /// Live krg-vm fight (None → static standing demo).
     fight: Option<FightRun>,
+    /// ms START has been held in fight mode (long-press → menu).
+    start_hold_ms: f64,
 }
 
 impl Scene {
@@ -311,6 +313,7 @@ impl Scene {
             fighters: [p1, p2],
             prev_input: 0,
             fight,
+            start_hold_ms: 0.0,
         })
     }
 
@@ -359,8 +362,17 @@ impl Scene {
                 self.draw_menu(r);
             }
             Mode::Fight => {
-                if pressed & bits::B != 0 {
-                    self.mode = Mode::Menu;
+                // exit to menu: hold START for 1s (B is a kick button — a
+                // plain tap must never leave a fight)
+                if held & bits::S != 0 {
+                    self.start_hold_ms += dt.min(100.0);
+                    if self.start_hold_ms >= 1000.0 {
+                        self.start_hold_ms = 0.0;
+                        self.mode = Mode::Menu;
+                        log::info!("fight: START held — back to menu");
+                    }
+                } else {
+                    self.start_hold_ms = 0.0;
                 }
                 // step the live runtime at 60Hz with the touch bits
                 if let Some(fr) = self.fight.as_mut() {
@@ -468,8 +480,8 @@ impl Scene {
 
         // Corner hint (back to menu).
         if let Some(fr) = self.font.as_ref() {
-            let w = fr.metrics.text_width("B:MENU") as f32;
-            self.draw_text(r, "B:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
+            let w = fr.metrics.text_width("HOLD START:MENU") as f32;
+            self.draw_text(r, "HOLD START:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
         }
     }
 
@@ -509,7 +521,12 @@ impl Scene {
                 f.group as u16,
                 f.number as u16,
                 GAME_W / 2.0 + (cd.pos[0] - snap.cam_x) * scl,
-                ground_y - cd.pos[1] * scl - snap.cam_y * scl,
+                // MUGEN y-axis: pos.y is negative ABOVE the floor, so the
+                // screen y is ground + pos.y (camera y is ≤ 0, subtracting it
+                // shifts the world down when the camera rises — same term the
+                // stage layers use). The old `- pos.y` drew jumps *below* the
+                // floor and off-screen.
+                ground_y + (cd.pos[1] - snap.cam_y) * scl,
                 xs,
                 ys,
                 WHITE,
@@ -593,6 +610,12 @@ impl Scene {
         };
         for (t, x, y, s, c) in texts {
             self.draw_text(r, &t, x, y, s, c);
+        }
+
+        // exit hint (START is also round-start, so a hold — not a tap — exits)
+        if let Some(fr) = self.font.as_ref() {
+            let w = fr.metrics.text_width("HOLD START:MENU") as f32;
+            self.draw_text(r, "HOLD START:MENU", GAME_W - w - 4.0, GAME_H - 12.0, 1.0, GRAY);
         }
     }
 
