@@ -45,6 +45,10 @@ pub struct GlobalInfo {
     pub velocity: CharVelocity,
     pub movement: CharMovement,
     pub named: Vec<(String, Value)>,
+    /// Char localcoord width (def [Info] localcoord — 320 for classic
+    /// chars, 640 for kfm720 etc.). Drives const240p/480p/720p scaling
+    /// (char.go:5741 constp). Defaults to 320 until def parsing lands.
+    pub localcoord: f32,
     pub cmd_template: CommandList,
     pub anims: krg_format::anim::AnimationTable,
     pub warnings: Vec<String>,
@@ -224,6 +228,10 @@ pub struct CharState {
     pub physics: StateTypeT,
     pub pending_state: Option<i32>,
     pub ps: Vec<i32>, // persistent counters for the current state
+    /// Persistent counters for the negative states (-4..-1, slot = -n-1).
+    /// They outlive state changes (unlike `ps`) — cloned per tick before,
+    /// which silently re-armed every persistent(n) controller each frame.
+    pub neg_ps: [Vec<i32>; 4],
     // movement
     pub pos: [f32; 3],
     pub vel: [f32; 3],
@@ -278,6 +286,8 @@ pub struct CharState {
     pub round_state_cache: i32,
     pub round_no_cache: i32,
     pub rounds_existed_cache: i32,
+    /// MatchOver trigger cache (Fight refreshes each tick)
+    pub match_over_cache: bool,
     pub stage_left: f32,
     pub stage_right: f32,
     pub attack_dist: f32,
@@ -322,6 +332,7 @@ impl CharState {
             physics: StateTypeT::S,
             pending_state: None,
             ps: Vec::new(),
+            neg_ps: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             pos: [0.0; 3],
             vel: [0.0; 3],
             facing: 1,
@@ -365,6 +376,7 @@ impl CharState {
             round_state_cache: 0,
             round_no_cache: 1,
             rounds_existed_cache: 0,
+            match_over_cache: false,
             stage_left: -320.0,
             stage_right: 320.0,
             attack_dist: gi.size.attack_dist,
@@ -610,6 +622,7 @@ impl Ctx for CharState {
             CanRecover => v_bool(!self.ghv.fall || self.ghv.yaccel == 0.0),
             AnimLoopCount => v_int(self.anim.loopcount),
             RoundsExisted => v_int(self.rounds_existed_cache),
+            MatchOver => v_bool(self.match_over_cache),
             ConsecutiveWins => v_int(0),
             MatchNo => v_int(1),
             IsHomeTeam => v_bool(self.team_side == 0),
@@ -772,8 +785,9 @@ impl Ctx for CharState {
         }
     }
 
-    fn const_scaled(&mut self, scaled_value: f32) -> f32 {
-        scaled_value
+    fn const_scaled(&mut self, base: f32, value: f32) -> f32 {
+        // char.go:5741 constp: localcoord_x / base * value
+        self.gi.localcoord / base * value
     }
 
     fn animelemtime(&mut self, n: i32) -> i32 {
@@ -981,13 +995,12 @@ impl StateHost for CharState {
             self.ps.resize(idx + 1, 0);
         }
         let c = &mut self.ps[idx];
-        if *c > 0 {
-            if *c != i32::MAX {
-                *c -= 1;
-            }
-            return true;
+        // bytecode.go:5136 — decrement first, then test (persistent(1) = the
+        // default — runs every tick)
+        if *c != i32::MAX {
+            *c -= 1;
         }
-        false
+        *c > 0
     }
     fn persistent_reset(&mut self, pi: i32, value: i32) {
         let idx = pi as usize;
@@ -1577,6 +1590,9 @@ impl Fight {
             c.p2 = view;
             c.round_state_cache = self.round_state;
             c.round_no_cache = self.round_no;
+            c.match_over_cache = self.finished
+                || (self.round_state == 3
+                    && (self.wins[0] >= self.max_wins || self.wins[1] >= self.max_wins));
             c.stage_left = self.stage_left;
             c.stage_right = self.stage_right;
             // Proximity guard fires only while p2 is actually swinging
@@ -1797,13 +1813,20 @@ impl Fight {
     fn action_run(&mut self, i: usize) {
         let c = &mut self.chars[i];
 
-        // negative states (-4…-1) run first when present
+        // negative states (-4…-1) run first when present. Their persistent
+        // counters live per-char and OUTLIVE state changes (bytecode.go
+        // shares sb.ctrlsps across ticks — the old per-tick clone re-armed
+        // every persistent(n) controller each frame).
         for neg in [-4, -3, -2, -1] {
             let sb_owned = c.gi.states.get(&neg).cloned();
             if let Some(sb) = sb_owned {
-                // negative states share the compiled sb.ctrlsps
-                let mut ps_owned = sb.ctrlsps.clone();
-                run_state_bytecode_with_ps(&sb, c, &mut ps_owned);
+                let slot = (-neg - 1) as usize; // -4→0 … -1→3
+                let mut ps = std::mem::take(&mut c.neg_ps[slot]);
+                if ps.len() < sb.ctrlsps.len() {
+                    ps.resize(sb.ctrlsps.len(), 0);
+                }
+                run_state_bytecode_with_ps(&sb, c, &mut ps);
+                c.neg_ps[slot] = ps;
             }
         }
 
@@ -2130,17 +2153,22 @@ impl Fight {
 pub fn run_state_bytecode_with_ps(
     sb: &StateBytecode,
     host: &mut CharState,
-    ps: &mut [i32],
+    ps: &mut Vec<i32>,
 ) -> bool {
-    host.persistent_ensure(ps.len().max(sb.ctrlsps.len()));
-    // state_def params are applied on ENTRY (apply_pending_state), not here
-    run_block_with_ps(&sb.block, host, &mut ps.to_vec(), false)
+    if ps.len() < sb.ctrlsps.len() {
+        ps.resize(sb.ctrlsps.len(), 0);
+    }
+    // state_def params are applied on ENTRY (apply_pending_state), not here.
+    // `ps` passes through UNCLONED: persistent counters must survive the
+    // call (the old ps.to_vec() threw every countdown away each tick, so
+    // persistent(0) latches never latched and persistent(n) never skipped).
+    run_block_with_ps(&sb.block, host, ps.as_mut_slice(), false)
 }
 
 fn run_block_with_ps(
     block: &crate::statedef::StateBlock,
     host: &mut CharState,
-    ps: &mut Vec<i32>,
+    ps: &mut [i32],
     in_loop: bool,
 ) -> bool {
     if host.hit_paused() && !block.ignorehitpause {
@@ -2149,13 +2177,15 @@ fn run_block_with_ps(
     let pi = block.persistent_index;
     if pi >= 0 {
         let idx = pi as usize;
-        if ps.len() <= idx {
-            return false; // shouldn't happen; persistent_ensure pre-sized
+        if idx >= ps.len() {
+            return false; // shouldn't happen; callers pre-size
+        }
+        // bytecode.go:5136 — decrement FIRST, then test: persistent(1) (the
+        // default) runs every tick, persistent(2) every 2nd, 0 = latch.
+        if ps[idx] != i32::MAX {
+            ps[idx] -= 1;
         }
         if ps[idx] > 0 {
-            if ps[idx] != i32::MAX {
-                ps[idx] -= 1;
-            }
             return false;
         }
     }
@@ -2183,7 +2213,7 @@ fn run_block_with_ps(
 fn run_node_with_ps(
     node: &Node,
     host: &mut CharState,
-    ps: &mut Vec<i32>,
+    ps: &mut [i32],
     in_loop: bool,
 ) -> bool {
     match node {
@@ -2341,6 +2371,7 @@ pub fn compile_char(
         velocity,
         movement,
         named: std::mem::take(&mut sc.named),
+        localcoord: 320.0, // def [Info] not parsed yet — classic chars
         cmd_template: {
             // rebuild a fresh template from the same compiled definitions
             let mut t = CommandList::new();

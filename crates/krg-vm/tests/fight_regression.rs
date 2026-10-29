@@ -237,3 +237,115 @@ fn single_jab_costs_single_hit() {
         "point-blank jab never connected — hit detection broken"
     );
 }
+
+// ── round 2 (v0.9.1 device feedback) ─────────────────────────────────────────
+
+/// 5: jump ANIMATION must stay on a real KFM action (41/42/43) for the whole
+/// arc. The state-50 falling switch (`vel y > const240p(-2) && selfAnimExist
+/// (anim+3) && anim = [41,43]`) used to compile with its trigger deleted
+/// (the `persistent(0)` prefix swallowed the rest of the sentence), so
+/// ChangeAnim(anim+3) fired EVERY tick — anim ran away 41→44→47→…→164 and
+/// the char flickered between missing anims (invisible most ticks).
+#[test]
+fn jump_anim_stays_on_kfm_actions_no_flicker() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    skip_intro(&mut fight);
+
+    let mut up = none();
+    up[0] = true;
+    for t in 0..70 {
+        let inp = if t < 4 { up } else { none() };
+        fight.step(&[inp, none()]);
+        let c = &fight.chars[0];
+        let valid = |a: i32| (0..=47).contains(&a) || a == 100 || a == 105 || a == 106;
+        assert!(
+            valid(c.anim.anim_no),
+            "t{t}: anim ran away to {} (missing anim → invisible/flicker)",
+            c.anim.anim_no
+        );
+        // while airborne (state 50) the anim must be one of KFM's jump arcs
+        if c.state_no == 50 {
+            assert!(
+                (41..=43).contains(&c.anim.anim_no),
+                "t{t}: state 50 must use jump anim 41/42/43, got {}",
+                c.anim.anim_no
+            );
+        }
+    }
+}
+
+/// 6: holding UP+RIGHT at jump start must set a POSITIVE x velocity (KFM
+/// jump.fwd.x = 2.5, minus one tick of jump-start friction ≈ 2.1) and cross
+/// toward P2; UP+LEFT mirrors it. `const(velocity.jump.fwd.x)` used to fall
+/// to the named-const fallback (v_none → 0) — every jump went neutral.
+#[test]
+fn diagonal_jump_gets_forward_velocity() {
+    for (dir, expect_sign) in [(3usize, 1.0), (2usize, -1.0)] {
+        let gi = compile_kfm();
+        let mut fight = Fight::new_1v1(gi, 42);
+        skip_intro(&mut fight);
+        let mut inp = none();
+        inp[0] = true; // U
+        inp[dir] = true; // R (3) toward P2 / L (2) away
+        let mut peak_vx = 0.0f32;
+        for t in 0..12 {
+            fight.step(&[inp, none()]);
+            if fight.chars[0].state_no == 50 {
+                peak_vx = fight.chars[0].vel[0];
+                break;
+            }
+        }
+        assert!(
+            peak_vx * expect_sign >= 2.0,
+            "jump with dir bit {dir}: expected |vel x| ≥ 2.0 with sign \
+             {expect_sign}, got {peak_vx} — const(velocity.jump.fwd/back.x) \
+             fell back to 0 again"
+        );
+    }
+}
+
+/// 7: persistent() cadence — with a persistent(2) controller the counter
+/// must actually count: fire, skip one tick, fire again (the old
+/// `ps.to_vec()` clone re-armed everything every tick, and the check order
+/// blocked every OTHER tick even at persistent(1)).
+#[test]
+fn persistent_counters_survive_across_ticks() {
+    use krg_vm::runtime::run_state_bytecode_with_ps;
+    use krg_vm::statedef::Node;
+
+    let gi = compile_kfm();
+    let mut c = krg_vm::runtime::CharState::new(gi.clone(), 0, 0, 1);
+    // tiny hand-built state: persistent(2) if 1 { sysvar(5) := sysvar(5)+1 }
+    let mut sb = krg_vm::statedef::StateBytecode::new(0);
+    let inner = Node::ExprStmt(vec![
+        krg_vm::op::Op::Push(krg_vm::value::v_int(5)),
+        krg_vm::op::Op::Push(krg_vm::value::v_int(5)),
+        krg_vm::op::Op::SysvarGet,
+        krg_vm::op::Op::Push(krg_vm::value::v_int(1)),
+        krg_vm::op::Op::Add,
+        krg_vm::op::Op::AssignSysvar,
+    ]);
+    let blk = krg_vm::statedef::StateBlock {
+        persistent: 2,
+        persistent_index: 0,
+        ignorehitpause: false,
+        ctrls_ignorehitpause: false,
+        trigger: None, // unconditional
+        else_block: None,
+        ctrls: vec![inner],
+    };
+    sb.block = blk;
+    sb.ctrlsps = vec![0];
+    let mut ps = vec![0i32];
+    // 6 ticks: fires on t0, t2, t4 → sysvar(5) == 3
+    for _ in 0..6 {
+        run_state_bytecode_with_ps(&sb, &mut c, &mut ps);
+    }
+    assert_eq!(
+        c.sysvars[5], 3,
+        "persistent(2) must fire every 2nd tick — got {} (counters not \
+         surviving?)",
+        c.sysvars[5]
+    );
+}

@@ -574,6 +574,7 @@ impl<'a> Compiler<'a> {
             "inguarddist" => out.push(Op::Trig(Trig::InGuardDist)),
             "canrecover" => out.push(Op::Trig(Trig::CanRecover)),
             "roundsexisted" => out.push(Op::Trig(Trig::RoundsExisted)),
+            "matchover" => out.push(Op::Trig(Trig::MatchOver)),
             "consecutivewins" => out.push(Op::Trig(Trig::ConsecutiveWins)),
             "matchno" => out.push(Op::Trig(Trig::MatchNo)),
             "ishometeam" => out.push(Op::Trig(Trig::IsHomeTeam)),

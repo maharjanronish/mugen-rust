@@ -25,8 +25,8 @@ pub trait Ctx {
     fn gethitvar(&mut self, k: GetHitVarKind) -> Value;
     fn const_kind(&mut self, k: ConstKind) -> Value;
     /// const240p/480p/720p — Go OC_ex_const240p: value scaled by
-    /// localcoord ratio (char_height / base)
-    fn const_scaled(&mut self, scaled_value: f32) -> f32;
+    /// localcoord ratio (char localcoord width / base)
+    fn const_scaled(&mut self, base: f32, value: f32) -> f32;
     /// `animelemtime(n)` — 0-based; <0 before, >0 after (Go OC_animelemtime)
     fn animelemtime(&mut self, n: i32) -> i32;
     /// `animelemno(t)` — elem at time t (Go OC_animelemno)
@@ -259,9 +259,11 @@ pub fn eval_into(exp: &[Op], ctx: &mut dyn Ctx, stack: &mut Vec<Value>) {
             }
             Op::GetHitVar(k) => stack.push(ctx.gethitvar(*k)),
             Op::Const(k) => stack.push(ctx.const_kind(*k)),
-            Op::Const240p => scale_const(stack, ctx, 240.0),
-            Op::Const480p => scale_const(stack, ctx, 480.0),
-            Op::Const720p => scale_const(stack, ctx, 720.0),
+            // bases are the WIDTH coords of the reference resolutions
+            // (bytecode.go:3432: const240p → constp(320, v))
+            Op::Const240p => scale_const(stack, ctx, 320.0),
+            Op::Const480p => scale_const(stack, ctx, 640.0),
+            Op::Const720p => scale_const(stack, ctx, 1280.0),
             Op::Floor => {
                 if let Some(t) = stack.last_mut() {
                     *t = v_int(t.to_i());
@@ -338,6 +340,8 @@ fn assign_f(
 fn scale_const(stack: &mut Vec<Value>, ctx: &mut dyn Ctx, base: f32) {
     if let Some(t) = stack.last_mut() {
         let v = t.to_f();
-        t.set_f(ctx.const_scaled(v * base));
+        // bytecode.go:3432 — constp(base, v) = localcoord_x / base * v
+        // (bases: 240p→320, 480p→640, 720p→1280 width coords)
+        t.set_f(ctx.const_scaled(base, v));
     }
 }

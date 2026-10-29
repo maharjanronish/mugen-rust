@@ -239,9 +239,47 @@ impl<'a, 'sc> ZssParser<'a, 'sc> {
                     nodes.push(Node::Block(Box::new(blk)));
                 }
                 Sk::Text => {
-                    let t = text.trim().to_string();
+                    let mut t = text.trim().to_string();
                     if t.is_empty() {
                         continue;
+                    }
+                    // ── strip leading block attributes ────────────────────
+                    // `persistent(n)` / `ignorehitpause` may PREFIX a whole
+                    // statement on the same sentence
+                    // (`persistent(0) if … { … }`). They must set the
+                    // pending flag and leave the REST of the sentence for
+                    // normal dispatch — dropping it (the old bug) deleted
+                    // the entire `if` condition, leaving an unconditional
+                    // ghost block (the state-50 flicker).
+                    loop {
+                        let (word, rest) = Self::first_word(&t);
+                        let wl = word.to_lowercase();
+                        if wl != "persistent" && wl != "ignorehitpause" {
+                            break;
+                        }
+                        // attribute argument: first '(…)' after the keyword
+                        let (arg, after) = match rest.find('(') {
+                            Some(p) => match rest[p..].find(')') {
+                                Some(e) => (&rest[p + 1..p + e], rest[p + e + 1..].trim()),
+                                None => ("", ""),
+                            },
+                            None => ("", rest),
+                        };
+                        if wl == "persistent" {
+                            let n = crate::ini::atoi(arg.trim());
+                            // 0 = run once per state entry (i32::MAX latch)
+                            self.persistent_next =
+                                Some(if n <= 0 { i32::MAX } else { n.min(128) });
+                        } else {
+                            self.ihp_next = true;
+                        }
+                        t = after.to_string();
+                        if t.is_empty() {
+                            break;
+                        }
+                    }
+                    if t.is_empty() {
+                        continue; // attribute alone — applies to the next `{`
                     }
                     let (word, rest) = Self::first_word(&t);
                     let wl = word.to_lowercase();
@@ -290,15 +328,8 @@ impl<'a, 'sc> ZssParser<'a, 'sc> {
                             let node = self.parse_call(rest)?;
                             nodes.push(node);
                         }
-                        "ignorehitpause" => {
-                            self.ihp_next = true;
-                        }
-                        "persistent" => {
-                            // persistent(n)
-                            let n = extract_paren(&rest).unwrap_or("1");
-                            let n = crate::ini::atoi(n);
-                            self.persistent_next = Some(if n <= 0 { i32::MAX } else { n.min(128) });
-                        }
+                        // ("persistent" / "ignorehitpause" never reach here:
+                        // leading attributes are stripped before dispatch.)
                         _ => {
                             // sctrl block or expression statement
                             let (k2, t2) = self.r.next();

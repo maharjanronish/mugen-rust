@@ -200,6 +200,8 @@ pub enum Trig {
     RoundsExisted,
     ConsecutiveWins,
     MatchNo,
+    /// true once the match is decided (win poses / post-match states)
+    MatchOver,
     IsHomeTeam,
     AiLevel,
     Win,
@@ -372,8 +374,12 @@ impl ConstKind {
             "velocity.run.back.y" => VelocityRunBackY,
             "velocity.jump.neu" | "velocity.jump.y" => VelocityJumpY,
             "velocity.jump.neu.x" => VelocityJumpNeuX,
-            "velocity.jump.back" => VelocityJumpBack,
-            "velocity.jump.fwd" => VelocityJumpFwd,
+            // .x suffixes: common1.cns.zss state 40 uses const(velocity.jump.
+            // back.x) / const(velocity.jump.fwd.x) — without them the name
+            // fell to the named-const fallback (v_none → 0) and every jump
+            // went neutral (compiler.go:2402-2413).
+            "velocity.jump.back" | "velocity.jump.back.x" => VelocityJumpBack,
+            "velocity.jump.fwd" | "velocity.jump.fwd.x" => VelocityJumpFwd,
             "velocity.runjump.back.x" => VelocityRunJumpBackX,
             "velocity.runjump.back.y" => VelocityRunJumpBackY,
             "velocity.runjump.fwd.x" => VelocityRunJumpFwdX,

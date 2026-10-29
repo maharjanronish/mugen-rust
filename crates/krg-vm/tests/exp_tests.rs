@@ -57,8 +57,9 @@ impl Ctx for MockCtx {
     fn const_kind(&mut self, _k: ConstKind) -> Value {
         v_int(0)
     }
-    fn const_scaled(&mut self, v: f32) -> f32 {
-        v
+    fn const_scaled(&mut self, base: f32, v: f32) -> f32 {
+        // mock: 320-localcoord char → identity for const240p
+        320.0 / base * v
     }
     fn animelemtime(&mut self, n: i32) -> i32 {
         n // mock: returns arg

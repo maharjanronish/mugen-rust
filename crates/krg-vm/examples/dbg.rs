@@ -17,7 +17,7 @@ impl Ctx for MC {
     fn command(&mut self, _n: &str) -> bool { false }
     fn gethitvar(&mut self, _k: GetHitVarKind) -> Value { v_int(0) }
     fn const_kind(&mut self, _k: ConstKind) -> Value { v_int(0) }
-    fn const_scaled(&mut self, v: f32) -> f32 { v }
+    fn const_scaled(&mut self, base: f32, v: f32) -> f32 { 320.0 / base * v }
     fn animelemtime(&mut self, n: i32) -> i32 { n }
     fn animelemno(&mut self, t: f32) -> i32 { t as i32 }
     fn animexist(&mut self, _n: i32) -> bool { true }
