@@ -3006,13 +3006,19 @@ impl Fight {
     /// Render snapshot (cheap; clones only the draw-relevant fields).
     ///
     /// `alpha` is the fraction of the way from the LAST tick to the next
-    /// one (tick_acc / tick_ms, system.go:2643 tickInterpolation). The
-    /// snapshot lerps each char's position and the camera from their
-    /// start-of-tick values toward the current ones — on displays faster
-    /// than 60Hz the in-between frames draw in-between positions instead
-    /// of repeating the last tick's (the walking "onion skin" judder).
-    /// Frozen chars (hitpause / posfreeze) have prev == cur, so they stay
-    /// put; alpha is clamped to [0,1].
+    /// one (system.go:2643 tickInterpolation). **Callers pass 1.0** —
+    /// Ikemen GO's effective mobile behavior: await() (system.go:881) paces
+    /// rendering at 60fps == the logic rate, and tickInterpolation() pins
+    /// alpha to 1 on every boundary frame (`if s.tickNextFrame() { return
+    /// 1 }`), so each drawn frame is the end-of-tick state with pose and
+    /// position coherent. alpha < 1 lerps each char's position and the
+    /// camera from their start-of-tick values toward the current ones —
+    /// kept for a future config toggle, exactly like Ikemen's
+    /// TickInterpolation (defaultConfig.ini ships it =1; it only engages
+    /// when display frames outnumber logic ticks, and the boundary rule
+    /// keeps its sequence monotonic). Frozen chars (hitpause / posfreeze)
+    /// have prev == cur, so they stay put at any alpha; alpha is clamped
+    /// to [0,1].
     pub fn snapshot(&self, alpha: f32) -> FightSnapshot {
         let a = alpha.clamp(0.0, 1.0);
         let lerp = |p: f32, c: f32| p + (c - p) * a;

@@ -474,20 +474,32 @@ impl Scene {
 
     fn draw_fight(&mut self, r: &mut Renderer) {
         // Live runtime path: snapshot (borrows end here), then draw with it.
-        // The snapshot lerps prev→cur positions by the fraction of the way
-        // to the next tick (tick_acc / tick_ms) — render interpolation, so
-        // 90/120Hz displays get in-between positions instead of a 60Hz
-        // stepper (the walking "onion skin" judder). Match over freezes at
-        // the final position (alpha 1).
-        let live = self.fight.as_ref().map(|fr| {
-            const MS: f64 = 1000.0 / 60.0;
-            let alpha = if fr.fight.finished {
-                1.0
-            } else {
-                (fr.tick_acc / MS) as f32
-            };
-            (fr.fight.snapshot(alpha), fr.fight.chars[0].gi.clone())
-        });
+        //
+        // alpha = 1 — draw the END-OF-TICK state on every display frame.
+        //
+        // Why (Ikemen GO, verified against source):
+        // * system.go:2643 tickInterpolation() pins alpha to 1 on the
+        //   boundary frame (`if s.tickNextFrame() { return 1 }`) — "the final
+        //   rendered frame for this logical frame should be 100% progress".
+        // * system.go:881 await() — the fight loop paces RENDERING at
+        //   gameRenderSpeed() (60fps) via redrawWait sleeps, i.e. render rate
+        //   == logic rate, so on the mobile path every drawn frame IS a
+        //   boundary frame: Ikemen effectively draws end-of-tick state.
+        //   (defaultConfig.ini ships TickInterpolation=1, but it only engages
+        //   when display frames outnumber logic ticks, and the boundary rule
+        //   keeps its sequence monotonic: 0.3·d, 0.6·d, d, d+0.3·d₂, …)
+        // * The old alpha = tick_acc / MS drew the char at alpha≈0 on the
+        //   frame a tick just drained — the position of one FULL tick ago
+        //   under the NEW anim pose. At 90/120Hz that sawtoothed
+        //   (0.5·d → 0 → 0.5·d → 0…): the char visibly jumped backward every
+        //   other frame — the reported "onion skin / previous frame visible"
+        //   judder. alpha 1 is monotonic and matches Ikemen frame-for-frame.
+        // The lerp machinery (snapshot(alpha), prev_pos) stays for a future
+        // TickInterpolation config toggle, exactly like Ikemen.
+        let live = self
+            .fight
+            .as_ref()
+            .map(|fr| (fr.fight.snapshot(1.0), fr.fight.chars[0].gi.clone()));
         if let Some((snap, gi)) = live {
             self.draw_stage_layer(r, 0, snap.cam_x, snap.cam_y);
             self.draw_fight_chars(r, &snap, &gi);
