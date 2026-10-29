@@ -238,3 +238,47 @@ fn render_interpolation_lerps() {
     );
     assert!(sr.cam_x.abs() < 0.01);
 }
+
+/// Guard-end (140) auto-exit (char.go:12513): after guarding and then
+/// releasing EVERYTHING (no direction, no attack), the char must return
+/// to a normal idle state — the common states have no ChangeState out of
+/// 140, the engine exits it when the guard-end anim completes. Without
+/// the port the char stood in 140 forever: the "stuck / frozen after
+/// guarding" device bug.
+#[test]
+fn guard_end_exits_to_idle() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    skip_intro(&mut fight);
+
+    // P1 walks adjacent
+    let mut walk = none();
+    walk[3] = true;
+    for _ in 0..55 {
+        fight.step(&[walk, none()]);
+    }
+
+    // P1 taps the trip kick twice; P2 crouch-guards
+    let mut p1d = none();
+    p1d[1] = true;
+    let mut p2 = none();
+    p2[1] = true;
+    p2[3] = true;
+    for t in 0..80 {
+        let mut p1t = p1d;
+        p1t[5] = t % 40 < 2;
+        fight.step(&[p1t, p2]);
+    }
+    // both stop doing anything at all
+    for _ in 0..120 {
+        fight.step(&[none(), none()]);
+    }
+    let st = fight.chars[1].state_no;
+    println!("after 2s idle: p2 state = {st} (ctrl={})", fight.chars[1].ctrl);
+    let idle = [0, 10, 11, 12, 20, 120];
+    assert!(
+        idle.contains(&st),
+        "char stuck in guard-end state {st} after releasing all inputs"
+    );
+    assert!(fight.chars[1].ctrl, "ctrl not restored after guard");
+}

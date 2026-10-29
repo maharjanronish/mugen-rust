@@ -2113,6 +2113,30 @@ impl Fight {
         if getup {
             self.chars[i].change_state(5120);
         }
+        // char.go:12513 — guard-end (140) auto-exit: the common states have
+        // NO ChangeState out of 140; the engine leaves it once the guard-end
+        // anim is done (or missing) → 0 stand / 11 crouch / 51 air. Without
+        // this port, a player who released back after guarding stood in
+        // state 140 (type U, physics U) until they pressed something — the
+        // "character stuck / frozen after guarding" device bug.
+        if self.chars[i].state_no == 140 {
+            let (anim_no, time_in, st) = {
+                let c = &self.chars[i];
+                (c.anim.anim_no, c.time_in_state, c.state_type)
+            };
+            let anim_done = match self.chars[i].gi.anims.anims.get(&anim_no) {
+                None => true, // anim == nil
+                Some(a) => a.frames.is_empty() || time_in >= a.totaltime.max(0),
+            };
+            if anim_done {
+                let next = match st {
+                    StateTypeT::C => 11,
+                    StateTypeT::A => 51,
+                    _ => 0,
+                };
+                self.chars[i].change_state(next);
+            }
+        }
         let liedown_time = self.chars[i].gi.data.liedown_time;
         let c = &mut self.chars[i];
         if c.move_type == MoveTypeT::H {
