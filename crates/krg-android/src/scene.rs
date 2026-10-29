@@ -47,6 +47,10 @@ const GAME_H: f32 = 240.0;
 /// VM milestone.
 const MENU_ITEMS: [&str; 4] = ["ARCADE", "VS MODE", "TRAINING", "OPTIONS"];
 
+/// Version shown in the menu corner — keep in sync with
+/// android/app/build.gradle.kts `versionName`.
+const VERSION: &str = "0.9.0";
+
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const GRAY: [u8; 4] = [160, 160, 160, 255];
 const YELLOW: [u8; 4] = [255, 255, 0, 255];
@@ -411,8 +415,8 @@ impl Scene {
         // Footer hints + version.
         self.draw_text_centered(r, "UP/DOWN + A", 226.0, 1.0, GRAY);
         if let Some(fr) = self.font.as_ref() {
-            let w = fr.metrics.text_width("0.8.0") as f32;
-            self.draw_text(r, "0.8.0", GAME_W - w - 4.0, 4.0, 1.0, GRAY);
+            let w = fr.metrics.text_width(VERSION) as f32;
+            self.draw_text(r, VERSION, GAME_W - w - 4.0, 4.0, 1.0, GRAY);
         }
     }
 
