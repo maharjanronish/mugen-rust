@@ -181,3 +181,60 @@ fn diag_standing_hit_by_trip_kick() {
     }
     assert!(grounded_again, "tripped player never recovered to the ground");
 }
+
+/// Render interpolation (char.go oldPos/interPos + system.go
+/// tickInterpolation): snapshot(alpha) lerps each char's position between
+/// the start of the last tick and the current one, and the camera too.
+/// This is the fix for the "onion skin" movement judder on 90/120Hz
+/// displays.
+#[test]
+fn render_interpolation_lerps() {
+    let gi = compile_kfm();
+    let mut fight = Fight::new_1v1(gi, 42);
+    skip_intro(&mut fight);
+
+    // one walking tick
+    let before = fight.chars[0].pos[0];
+    let cam_before = fight.cam_x;
+    let mut r = none();
+    r[3] = true;
+    fight.step(&[r, none()]);
+    let after = fight.chars[0].pos[0];
+    assert!(after > before, "char did not move ({before} → {after})");
+
+    let s0 = fight.snapshot(0.0);
+    let s1 = fight.snapshot(1.0);
+    let sh = fight.snapshot(0.5);
+    assert!(
+        (s0.chars[0].pos[0] - before).abs() < 0.01,
+        "alpha 0 must draw the start-of-tick position"
+    );
+    assert!(
+        (s1.chars[0].pos[0] - after).abs() < 0.01,
+        "alpha 1 must draw the end-of-tick position"
+    );
+    let mid = (before + after) * 0.5;
+    assert!(
+        (sh.chars[0].pos[0] - mid).abs() < 0.05,
+        "alpha 0.5 must draw the midpoint"
+    );
+    // camera lerps between its start/end values as well
+    let cam_mid = (cam_before + fight.cam_x) * 0.5;
+    assert!((sh.cam_x - cam_mid).abs() < 0.05);
+
+    // a second tick snapshots the new baseline: alpha 0 == the position
+    // at the START of that tick (== where tick 1 ended)
+    let after_t1 = fight.chars[0].pos[0];
+    fight.step(&[r, none()]);
+    let s0b = fight.snapshot(0.0);
+    assert!((s0b.chars[0].pos[0] - after_t1).abs() < 0.01);
+
+    // round reset: no teleport smear (prev baseline follows the reset)
+    fight.restart_match();
+    let sr = fight.snapshot(0.0);
+    assert!(
+        (sr.chars[0].pos[0] - fight.chars[0].pos[0]).abs() < 0.01,
+        "round reset must sync the interpolation baseline"
+    );
+    assert!(sr.cam_x.abs() < 0.01);
+}

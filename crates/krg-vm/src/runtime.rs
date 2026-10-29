@@ -1556,10 +1556,21 @@ pub struct Fight {
     /// The renderer reports the aspect-driven width each frame; pos_update
     /// keeps chars inside the visible slice.
     pub view_half_w: f32,
+    // ── render interpolation (char.go oldPos/interPos) ─────────────────
+    /// Position of each char at the START of the last tick. The renderer
+    /// lerps prev→cur by the fraction of the way to the next tick
+    /// (tickInterpolation, system.go:2643), so 90/120Hz displays draw
+    /// smooth motion instead of a 60Hz stepper — the "onion skin" judder
+    /// where the char seems to alternate between two positions while
+    /// walking.
+    pub prev_pos: Vec<[f32; 3]>,
+    /// Camera at the start of the last tick (same treatment).
+    pub prev_cam: [f32; 2],
 }
 
 impl Fight {
     pub fn new(chars: Vec<CharState>, seed: i32) -> Self {
+        let prev_pos: Vec<[f32; 3]> = chars.iter().map(|c| c.pos).collect();
         Fight {
             chars,
             rng: LehmerRng::new(if seed == 0 { 1 } else { seed }),
@@ -1585,6 +1596,8 @@ impl Fight {
             cam_vfollow: 0.2,
             cam_floortension: 0.0,
             view_half_w: 160.0,
+            prev_pos,
+            prev_cam: [0.0, 0.0],
         }
     }
 
@@ -1651,6 +1664,14 @@ impl Fight {
     /// per char: [U D L R a b c x y z s d w m].
     pub fn step(&mut self, inputs: &[[bool; 14]]) {
         self.frame_count += 1;
+
+        // render-interpolation snapshot (char.go posUpdate sets oldPos
+        // before moving): the renderer lerps these toward the new values
+        // by the fraction of the way to the next tick.
+        for i in 0..self.chars.len() {
+            self.prev_pos[i] = self.chars[i].pos;
+        }
+        self.prev_cam = [self.cam_x, self.cam_y];
 
         // ── round state machine (system.go stepRoundState, simplified) ──
         if self.intro_time > 0 {
@@ -1851,6 +1872,9 @@ impl Fight {
         self.cur_round_time = self.match_time;
         self.cam_x = 0.0;
         self.cam_y = 0.0;
+        // teleports: sync the interpolation baselines (no 1-frame smear
+        // sliding fighters from their KO spot to the start positions)
+        self.prev_cam = [0.0, 0.0];
         let starts = [(self.chars[0].start_pos, 1), (self.chars[1].start_pos, -1)];
         for (i, (x, face)) in starts.iter().enumerate() {
             self.reset_char_round(i, *x, *face);
@@ -1861,6 +1885,8 @@ impl Fight {
     /// Power and vars persist across rounds (system.go keeps them).
     fn reset_char_round(&mut self, i: usize, x: f32, face: i32) {
         let liedown_time = self.chars[i].gi.data.liedown_time;
+        // interpolation baseline follows the teleport (see start_round)
+        self.prev_pos[i] = [x, 0.0, 0.0];
         let c = &mut self.chars[i];
         c.pos = [x, 0.0, 0.0];
         c.vel = [0.0, 0.0, 0.0];
@@ -1924,6 +1950,12 @@ impl Fight {
         self.intro_time = 60;
         self.round_state = 0;
         self.cur_round_time = self.match_time;
+        // camera snaps home for the rematch (start_round does this too);
+        // the interpolation baseline follows so the first drawn frame has
+        // no pan smear from the old KO position
+        self.cam_x = 0.0;
+        self.cam_y = 0.0;
+        self.prev_cam = [0.0, 0.0];
     }
 
     /// Engine auto-turn (char.go): with ctrl on the ground, the char faces
@@ -2948,11 +2980,33 @@ impl Fight {
     }
 
     /// Render snapshot (cheap; clones only the draw-relevant fields).
-    pub fn snapshot(&self) -> FightSnapshot {
+    ///
+    /// `alpha` is the fraction of the way from the LAST tick to the next
+    /// one (tick_acc / tick_ms, system.go:2643 tickInterpolation). The
+    /// snapshot lerps each char's position and the camera from their
+    /// start-of-tick values toward the current ones — on displays faster
+    /// than 60Hz the in-between frames draw in-between positions instead
+    /// of repeating the last tick's (the walking "onion skin" judder).
+    /// Frozen chars (hitpause / posfreeze) have prev == cur, so they stay
+    /// put; alpha is clamped to [0,1].
+    pub fn snapshot(&self, alpha: f32) -> FightSnapshot {
+        let a = alpha.clamp(0.0, 1.0);
+        let lerp = |p: f32, c: f32| p + (c - p) * a;
         let chars = self
             .chars
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
+                let prev = self
+                    .prev_pos
+                    .get(i)
+                    .copied()
+                    .unwrap_or(c.pos);
+                let pos = [
+                    lerp(prev[0], c.pos[0]),
+                    lerp(prev[1], c.pos[1]),
+                    lerp(prev[2], c.pos[2]),
+                ];
                 let frame_idx = {
                     let anim = c.gi.anims.anims.get(&c.anim.anim_no);
                     match anim {
@@ -2970,7 +3024,7 @@ impl Fight {
                     }
                 };
                 CharDraw {
-                    pos: c.pos,
+                    pos,
                     facing: c.facing,
                     anim_no: c.anim.anim_no,
                     frame_idx,
@@ -2994,8 +3048,8 @@ impl Fight {
             round_state: self.round_state,
             round_no: self.round_no,
             time_left: self.cur_round_time / 60,
-            cam_x: self.cam_x,
-            cam_y: self.cam_y,
+            cam_x: lerp(self.prev_cam[0], self.cam_x),
+            cam_y: lerp(self.prev_cam[1], self.cam_y),
             finished: self.finished,
             wins: self.wins,
         }

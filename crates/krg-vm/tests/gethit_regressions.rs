@@ -268,13 +268,13 @@ fn round_machine_restarts_and_match_remakes() {
     assert!(match_over_tick.is_some(), "match never finished");
 
     // snapshot carries the end state
-    let snap = fight.snapshot();
+    let snap = fight.snapshot(1.0);
     assert!(snap.finished);
     assert!(snap.wins[0] >= fight.max_wins || snap.wins[1] >= fight.max_wins);
 
     // rematch: full reset
     fight.restart_match();
-    let snap = fight.snapshot();
+    let snap = fight.snapshot(1.0);
     assert!(!snap.finished, "restart_match left finished=true");
     assert_eq!(snap.round_no, 1);
     assert_eq!(snap.wins, [0, 2].map(|_| 0), "wins not cleared");

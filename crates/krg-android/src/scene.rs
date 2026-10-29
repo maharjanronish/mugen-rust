@@ -406,8 +406,17 @@ impl Scene {
                     if let Some(fr) = self.fight.as_mut() {
                         fr.tick_acc += dt.min(100.0);
                         const MS: f64 = 1000.0 / 60.0;
+                        // Post-hitch snap: never let the accumulator build a
+                        // deep backlog — draining it meant a multi-frame
+                        // 4x-tick burst (a visible fast-forward glitch after
+                        // a texture upload / GC hitch). Keeping at most one
+                        // pending tick still lets a single missed vsync
+                        // catch up with exactly one extra tick.
+                        if fr.tick_acc > MS * 2.0 {
+                            fr.tick_acc = MS * 2.0;
+                        }
                         let mut ticks = 0;
-                        while fr.tick_acc >= MS && ticks < 4 {
+                        while fr.tick_acc >= MS && ticks < 2 {
                             fr.tick_acc -= MS;
                             // P2 CPU: AiInput jam feeds raw input bits
                             let intro = fr.fight.round_state < 2;
@@ -464,9 +473,20 @@ impl Scene {
     // ── fight ───────────────────────────────────────────────────────────────
 
     fn draw_fight(&mut self, r: &mut Renderer) {
-        // Live runtime path: snapshot (borrows end here), then draw with it
+        // Live runtime path: snapshot (borrows end here), then draw with it.
+        // The snapshot lerps prev→cur positions by the fraction of the way
+        // to the next tick (tick_acc / tick_ms) — render interpolation, so
+        // 90/120Hz displays get in-between positions instead of a 60Hz
+        // stepper (the walking "onion skin" judder). Match over freezes at
+        // the final position (alpha 1).
         let live = self.fight.as_ref().map(|fr| {
-            (fr.fight.snapshot(), fr.fight.chars[0].gi.clone())
+            const MS: f64 = 1000.0 / 60.0;
+            let alpha = if fr.fight.finished {
+                1.0
+            } else {
+                (fr.tick_acc / MS) as f32
+            };
+            (fr.fight.snapshot(alpha), fr.fight.chars[0].gi.clone())
         });
         if let Some((snap, gi)) = live {
             self.draw_stage_layer(r, 0, snap.cam_x, snap.cam_y);
